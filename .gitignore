@@ -1,0 +1,11 @@
+node_modules/
+
+__pycache__/
+*.pyc
+
+# Blender scratch
+*.blend1
+*.blend2
+
+# rendered contact sheets and pose previews (tools/render_preview.py)
+.preview/
