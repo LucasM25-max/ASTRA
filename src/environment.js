@@ -98,9 +98,10 @@ export function createScene() {
   /* Keep the shadow frustum centred on the character, so the shadow stays
      crisp however far it walks from the origin. */
   function trackShadow(target) {
-    key.target.position.set(target.x, 0, target.z);
+    const y = target.y ?? 0;
+    key.target.position.set(target.x, y, target.z);
     key.target.updateMatrixWorld();
-    key.position.set(target.x + 6, 11, target.z + 5);
+    key.position.set(target.x + 6, y + 11, target.z + 5);
   }
 
   return { scene, camera, ground, key, trackShadow };

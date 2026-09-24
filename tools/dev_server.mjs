@@ -27,6 +27,7 @@ export const TYPES = {
   ".json": "application/json; charset=utf-8",
   ".glb": "model/gltf-binary",
   ".gltf": "model/gltf+json",
+  ".geo": "application/octet-stream",
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".svg": "image/svg+xml",
