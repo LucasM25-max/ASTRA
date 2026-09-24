@@ -5,7 +5,8 @@
   "scripts": {
     "start": "node tools/dev_server.mjs",
     "dev": "node tools/dev_server.mjs",
-    "check": "node tools/check_app.mjs",
+    "check": "node tools/check_app.mjs && node tools/check_deploy.mjs",
+    "check:deploy": "node tools/check_deploy.mjs",
     "vendor": "node tools/vendor_three.mjs",
     "build:character": "tools/setup_blender_env.sh && LD_LIBRARY_PATH=${ASTRA_GFX_STUBS:-$HOME/gfxstub} ${ASTRA_BLENDER_ROOT:-$HOME/env}/bin/python tools/build_character.py && python3 tools/verify_glb.py",
     "check:clips": "LD_LIBRARY_PATH=${ASTRA_GFX_STUBS:-$HOME/gfxstub} ${ASTRA_BLENDER_ROOT:-$HOME/env}/bin/python tools/verify_clips.py",

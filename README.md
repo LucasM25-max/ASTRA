@@ -23,6 +23,32 @@ GitHub Pages deploy of the repository root, and so on. It only has to be served
 over HTTP rather than opened from the filesystem, because browsers refuse ES
 modules from `file://`.
 
+## Deploying
+
+The deploy is the repository: no build step, no output directory, and every URL
+the page requests is relative to it, so the same tree works at a domain root
+(`https://astra.vercel.app/`) and in a subpath (`https://user.github.io/ASTRA/`).
+
+`vercel.json` says as much, and has to, because a directory named `public/`
+changes what Vercel publishes: its "Other" preset serves `public/` when that
+directory exists, and quietly ignores `index.html` at the root -- the deployment
+succeeds, and `/` answers with Vercel's own *404: NOT_FOUND*. The config pins
+`outputDirectory` to `.`, so the root is served whatever else the repository
+contains:
+
+```json
+{ "framework": null, "buildCommand": null, "installCommand": null, "outputDirectory": "." }
+```
+
+`vercel.json` overrides the project's Build & Deployment settings in the
+dashboard, so a stale "Output Directory" saved there cannot break the site
+again. If you would rather fix it in the dashboard instead, choose the "Other"
+preset, leave Build Command empty, and set Output Directory to `.`.
+
+`npm run check:deploy` (part of `npm run check`) holds all of this to account
+before a deploy can surprise you: it walks the real import graph, fetches every
+URL over HTTP, and fails if the root could not serve the page.
+
 ## What is where
 
 ```
@@ -33,11 +59,17 @@ src/environment.js       renderer, sky, lights, the empty ground plane
 src/character.js         the glTF, its clips, and the clip state machine
 src/player.js            WASD / Shift / Space, movement and jump physics
 src/followCamera.js      third person camera
-public/assets/astra.glb  the character: mesh, 20 bone rig, six animations
+assets/astra.glb         the character: mesh, 20 bone rig, six animations
 tools/                   everything used to build and verify the character
 vendor/three/            three.js 0.186, copied out of node_modules
+vercel.json              deploy config: publish the repository root, no build
 docs/preview.png         the character in the app's own camera framing
 ```
+
+The repository root *is* the site: `index.html` sits at the top, everything it
+asks for is a relative URL next to it, and `assets/` is the one folder of
+payload. Nothing is named `public/` -- which is the difference between a working
+deploy and Vercel's 404 page (see *Deploying*).
 
 ## How it works
 
@@ -63,7 +95,7 @@ to a sprint keeps the feet on the ground.
 ## Rebuilding the character
 
 The Blender build is scripted -- the mesh, the rig and every keyframe are
-authored from numbers -- so the committed `public/assets/astra.glb` can always
+authored from numbers -- so the committed `assets/astra.glb` can always
 be regenerated (Blender's exporter is free to order triangles differently, so
 `tools/verify_glb.py` checks the structure rather than the bytes). Blender comes from PyPI as
 the headless `bpy` module; `tools/setup_blender_env.sh` installs it and
@@ -81,6 +113,7 @@ npm run preview:character   # render a contact sheet of the poses to /tmp
 ```bash
 npm install                 # three.js, for the checks only
 npm run check               # headless: needs no browser
+npm run check:deploy        # just the deploy / module graph check
 ```
 
 `tools/check_app.mjs` loads the real glTF through the real three.js loader and
@@ -88,6 +121,16 @@ drives the real player code through the whole control set -- idle, walk,
 sprint, steering, jump, flight, landing -- asserting the clip that should be
 playing, the speed it should be playing at, that the soles stay on the floor,
 that the body faces the way it moves, and that the camera stays behind it.
+
+`tools/check_deploy.mjs` asks the other question: whether the repository, served
+as it is, is a working site. It follows every import from `index.html` through
+the import map, the `src` modules and the vendored three.js (including
+GLTFLoader's own helpers in `vendor/three/addons/utils`), checks that each file
+exists, is committed, and sits outside `public/`, and then serves the tree and
+fetches every URL -- because a module that comes back as `text/html`, or a
+`public/` directory that shadows the root, is a blank page in production rather
+than a failing test. `tools/vendor_three.mjs` walks the same graph, so the
+vendored three.js is always the whole closure of what GLTFLoader imports.
 
 ## Controls, in detail
 
