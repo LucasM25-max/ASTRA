@@ -95,16 +95,25 @@ export class Player {
       }
     }
 
-    // Speed is always driven towards a gait speed the animation was authored
-    // for; in the air, momentum is kept unless the player steers.
+    /* Speed is always driven towards a gait speed the animation was authored
+       for, so the feet stay planted. Two cases are special: in the air momentum
+       is kept, and through the landing absorb it is scrubbed off hard -- the
+       feet are planted flat there, so gliding through it would skate. */
     const absorbing = this.grounded && this.character.state === "land"
-      && this.character.timeLeft() > (input ? 0.10 : 0.16);
+      && this.character.timeLeft() > (input ? 0.08 : 0.22);
     let target = 0;
-    if (input && !absorbing) target = sprinting ? GAIT.run.speed : GAIT.walk.speed;
-    else if (!this.grounded) target = this.speed;
-    const rate = (target > this.speed ? MOVEMENT.accelerate : MOVEMENT.brake)
-      * (this.grounded ? 1 : MOVEMENT.airControl);
-    this.speed = THREE.MathUtils.damp(this.speed, target, rate, dt);
+    let rate = MOVEMENT.brake;
+    if (absorbing) {
+      rate = input ? 0 : MOVEMENT.absorbBrake;   // running landings carry on running
+    } else if (input) {
+      target = sprinting ? GAIT.run.speed : GAIT.walk.speed;
+      rate = target > this.speed ? MOVEMENT.accelerate : MOVEMENT.brake;
+    } else if (!this.grounded) {
+      target = this.speed;
+    } else {
+      rate = MOVEMENT.brake;
+    }
+    this.speed = THREE.MathUtils.damp(this.speed, target, rate * (this.grounded ? 1 : MOVEMENT.airControl), dt);
 
     if (input) {
       const wanted = Math.atan2(-input.x, -input.z);
@@ -141,7 +150,7 @@ export class Player {
     // The absorb at the end of a landing holds the pose -- and the feet -- for
     // a moment; control comes back a touch sooner if the player is already
     // pushing a direction again.
-    if (character.state === "land" && character.timeLeft() > (input ? 0.10 : 0.16)) return;
+    if (character.state === "land" && character.timeLeft() > (input ? 0.08 : 0.22)) return;
     character.setLocomotion(this.speed);
   }
 

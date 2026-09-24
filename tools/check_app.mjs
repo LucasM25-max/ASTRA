@@ -203,6 +203,49 @@ simulate(1.0);
 check("returns to idle after landing", character.state === "idle" && player.grounded,
   `state=${character.state} y=${player.position.y.toFixed(3)}`);
 
+/* --- landing at speed ---------------------------------------------------- */
+// Sprint, jump, and keep hold of the keys: the run has to resume without the
+// character stalling. Then the same but letting go as the feet touch down: the
+// body has to stop where it lands instead of gliding across the floor.
+function sprintJumpLand(stopAtTouchdown) {
+  release("KeyW");
+  release("ShiftLeft");
+  simulate(0.4);
+  press("KeyW");
+  press("ShiftLeft");
+  simulate(0.8);                       // up to a full sprint
+
+  press("Space");
+  player._onKeyUp({ code: "Space" });
+
+  let touchdown = null;
+  let travelled = 0;
+  simulate(2.0, {
+    onFrame: () => {
+      if (touchdown === null && player.grounded && character.state === "land") {
+        touchdown = player.position.clone();
+        if (stopAtTouchdown) { release("KeyW"); release("ShiftLeft"); }
+      }
+      if (touchdown) travelled = player.position.distanceTo(touchdown);
+    },
+  });
+  const result = { travelled, state: character.state, speed: player.speed };
+  release("KeyW");
+  release("ShiftLeft");
+  simulate(0.4);
+  return result;
+}
+
+const keptRunning = sprintJumpLand(false);
+check("a running landing keeps running", keptRunning.state === "run" && keptRunning.speed > 2.0,
+  `state=${keptRunning.state} speed=${keptRunning.speed.toFixed(2)} m/s`);
+
+const stoppedShort = sprintJumpLand(true);
+check("letting go on touchdown does not skate",
+  stoppedShort.state === "idle" && stoppedShort.travelled < 0.4,
+  `travelled ${stoppedShort.travelled.toFixed(2)} m after the feet touched down, `
+  + `state=${stoppedShort.state}`);
+
 /* --- camera -------------------------------------------------------------- */
 press("KeyW");
 press("ShiftLeft");

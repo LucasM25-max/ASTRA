@@ -11,7 +11,11 @@ Run it with the Blender Python module (pip install bpy) or inside Blender itself
     python tools/build_character.py            # writes public/assets/astra.glb
     blender -b -P tools/build_character.py     # same, from a Blender install
 
-Everything is deterministic, so the committed .glb can always be regenerated.
+Everything is authored from numbers, so the committed .glb can always be
+regenerated: the mesh, the rig and every keyframe come out the same. (Blender's
+exporter may order triangles differently between runs, so the file is not
+guaranteed to be byte-identical -- the geometry is, and tools/verify_glb.py
+checks the structure that matters.)
 """
 
 from __future__ import annotations

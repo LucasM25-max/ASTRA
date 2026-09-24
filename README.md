@@ -59,8 +59,10 @@ to a sprint keeps the feet on the ground.
 
 ## Rebuilding the character
 
-The Blender build is scripted and deterministic, so the committed
-`public/assets/astra.glb` can always be regenerated. Blender comes from PyPI as
+The Blender build is scripted -- the mesh, the rig and every keyframe are
+authored from numbers -- so the committed `public/assets/astra.glb` can always
+be regenerated (Blender's exporter is free to order triangles differently, so
+`tools/verify_glb.py` checks the structure rather than the bytes). Blender comes from PyPI as
 the headless `bpy` module; `tools/setup_blender_env.sh` installs it and
 fabricates the X11/OpenGL stub libraries it insists on linking against in a
 container that has no graphics stack.

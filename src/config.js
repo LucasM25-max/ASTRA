@@ -25,6 +25,8 @@ export const MOVEMENT = {
   /** how fast the character reaches its target speed (higher = snappier) */
   accelerate: 9.0,
   brake: 14.0,
+  /** the landing absorb scrubs momentum off this fast (a hard, short stop) */
+  absorbBrake: 26.0,
   /** steering: radians per second the body swings towards the input */
   turn: 10.0,
   /** horizontal control retained while airborne (1 = full, 0 = none) */
