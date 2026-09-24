@@ -54,6 +54,12 @@ URL over HTTP, and fails if the root could not serve the page.
 ```
 index.html               the page: a canvas, an import map, nothing else
 src/main.js              wiring: world + character + controls + render loop
+src/world.js             Sector 01 terrain, water, scatter; P1 PBR materials
+src/world/textures.js    procedural PBR library: 5 materials + micro-detail
+src/world/splat.js       field-driven splat weights, texel-density budgets
+src/world/terrainMaterial.js  height-blended triplanar shader injection
+src/world/footprints.js  wet-mud footprint tile stamped by the walker
+assets/world/            built sector geometry (ground, water, scatter)
 src/config.js            gait speeds, jump physics, camera and tunables
 src/environment.js       renderer, sky, lights, the empty ground plane
 src/character.js         the glTF, its clips, and the clip state machine
@@ -114,6 +120,9 @@ npm run preview:character   # render a contact sheet of the poses to /tmp
 npm install                 # three.js, for the checks only
 npm run check               # headless: needs no browser
 npm run check:deploy        # just the deploy / module graph check
+npm run check:world         # sector geometry audit (P0)
+npm run check:p1            # PBR ground shading suite (P1)
+npm run build:world         # rebuild assets/world from the toolchain
 ```
 
 `tools/check_app.mjs` loads the real glTF through the real three.js loader and

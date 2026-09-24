@@ -38,6 +38,7 @@ import {
   fouling, ROUTE_TRAVERSAL, channelShape, caveSillElevation, HOLLOW_SOURCES,
 } from "../src/world/relief.js";
 import { populate, STANDS } from "../src/world/populate.js";
+import { MATERIALS, P1 } from "../src/world/splat.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = join(root, "assets", "world");
@@ -183,12 +184,13 @@ function cachedSample(tile, cache) {
 /* ============================================================ ground mesh */
 
 function buildGround(tiles, cache) {
-  const pos = [], nrm = [], col = [], zoneIds = [];
+  const pos = [], nrm = [], col = [], zoneIds = [], fld = [];
   const tileKey = (x, z) => `${Math.floor((x - WORLD.bounds.minX) / TILE)},${Math.floor((z - WORLD.bounds.minZ) / TILE)}`;
   const tileSet = new Set(tiles.map((t) => `${t.tx},${t.tz}`));
   const sampleFor = (tile) => cachedSample(tile, cache);
   const indexIn = (sample, x, z) => {
-    const ix = Math.round((x - sample.baseX) / FINE), iz = Math.round((z - sample.baseZ) / FINE);
+    const step = sample.step ?? FINE;
+    const ix = Math.round((x - sample.baseX) / step), iz = Math.round((z - sample.baseZ) / step);
     return Math.max(0, Math.min(sample.n - 1, iz)) * sample.n + Math.max(0, Math.min(sample.n - 1, ix));
   };
 
@@ -207,6 +209,16 @@ function buildGround(tiles, cache) {
       const [r, g, bl] = shade(p.x, p.z, sample, i);
       col.push(r, g, bl);
       zoneIds.push(sample.zone[i]);
+      /* P1 ground fields: moisture, fouling, metres above the water, canopy.
+         The terrain shader splats its materials from these, so the audit and
+         the renderer read the same boundary for every waterline and wet band. */
+      const above = Number.isNaN(sample.lvl[i]) ? 8.0 : sample.h[i] - sample.lvl[i];
+      fld.push(
+        moistureOf(sample, i),
+        sample.foul[i] / 255,
+        Math.max(-2, Math.min(8, above)),
+        sample.canopy[i] / 255,
+      );
       verts++;
     }
     tris++;
@@ -264,7 +276,7 @@ function buildGround(tiles, cache) {
     }
   }
   const coarseSample = {
-    n: cnx + 1, h: ch,
+    n: cnx + 1, step: COARSE, h: ch,
     lvl: (() => { const a = new Float32Array((cnx + 1) * (cnz + 1)); for (let i = 0; i < a.length; i++) a[i] = NaN; return a; })(),
     wet: new Uint8Array((cnx + 1) * (cnz + 1)),
     zone: new Uint8Array((cnx + 1) * (cnz + 1)),
@@ -286,12 +298,31 @@ function buildGround(tiles, cache) {
     }
   }
 
+  /* P1: weld the face normals into smooth vertex normals. Every position sits
+     on an exact lattice (both spacings are multiples of 2 m), so the weld key
+     is exact -- including across the fine/coarse seam, which welds shut. */
+  const weldKey = (v) => `${Math.round(pos[v * 3] * 4)},${Math.round(pos[v * 3 + 2] * 4)}`;
+  const acc = new Map();
+  const vcount = pos.length / 3;
+  for (let v = 0; v < vcount; v++) {
+    const key = weldKey(v);
+    let a = acc.get(key);
+    if (!a) { a = [0, 0, 0]; acc.set(key, a); }
+    a[0] += nrm[v * 3]; a[1] += nrm[v * 3 + 1]; a[2] += nrm[v * 3 + 2];
+  }
+  for (let v = 0; v < vcount; v++) {
+    const a = acc.get(weldKey(v));
+    const len = Math.hypot(a[0], a[1], a[2]) || 1;
+    nrm[v * 3] = a[0] / len; nrm[v * 3 + 1] = a[1] / len; nrm[v * 3 + 2] = a[2] / len;
+  }
+
   return {
     attributes: {
       position: new Float32Array(pos),
       normal: new Float32Array(nrm),
       color: new Float32Array(col),
       zone: new Uint16Array(zoneIds),
+      aField: new Float32Array(fld),
     },
     stats: { vertices: pos.length / 3, triangles: tris, fineTiles: tiles.length },
   };
@@ -388,8 +419,16 @@ function nearestStream(x, z) {
 
 /* ========================================================= standing mesh */
 
-/** A box, in world space, with an optional lean. The greybox's only solid. */
-function pushBox(out, cx, cy, cz, hx, hy, hz, yaw, grey, lean = 0, leanDir = 0) {
+/**
+ * A box, in world space, with an optional lean. The greybox's only solid.
+ * P1 bakes real albedo into the vertex colours (bark, leaf, limestone, wood);
+ * the geometry is untouched -- P2/P5 own that -- but the colour carries which
+ * material each box pretends to be.
+ */
+function asRGB(color) {
+  return typeof color === "number" ? [color, color * 0.99, color * 0.97] : color;
+}
+function pushBox(out, cx, cy, cz, hx, hy, hz, yaw, color, lean = 0, leanDir = 0) {
   const corners = [
     [-1, -1, -1], [1, -1, -1], [1, -1, 1], [-1, -1, 1],
     [-1, 1, -1], [1, 1, -1], [1, 1, 1], [-1, 1, 1],
@@ -402,24 +441,25 @@ function pushBox(out, cx, cy, cz, hx, hy, hz, yaw, grey, lean = 0, leanDir = 0) 
     return [cx + wx, cy + y * Math.cos(lean), cz + wz];
   });
   const faces = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [3, 7, 6, 2], [2, 6, 5, 1], [0, 4, 7, 3]];
-  for (const f of faces) pushQuad(out, corners[f[0]], corners[f[1]], corners[f[2]], corners[f[3]], grey);
+  for (const f of faces) pushQuad(out, corners[f[0]], corners[f[1]], corners[f[2]], corners[f[3]], color);
 }
 
-function pushTriangle(out, a, b, c, grey) {
+function pushTriangle(out, a, b, c, color) {
   const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
   const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
   let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
   const len = Math.hypot(nx, ny, nz) || 1;
   nx /= len; ny /= len; nz /= len;
+  const [r, g, bl] = asRGB(color);
   for (const p of [a, b, c]) {
     out.pos.push(p[0], p[1], p[2]);
     out.nrm.push(nx, ny, nz);
-    out.col.push(grey, grey * 0.99, grey * 0.97);
+    out.col.push(r, g, bl);
   }
 }
-function pushQuad(out, a, b, c, d, grey) {
-  pushTriangle(out, a, b, c, grey);
-  pushTriangle(out, a, c, d, grey);
+function pushQuad(out, a, b, c, d, color) {
+  pushTriangle(out, a, b, c, color);
+  pushTriangle(out, a, c, d, color);
   out.tris += 2;
 }
 
@@ -431,37 +471,112 @@ function pushQuad(out, a, b, c, d, grey) {
  * all. The lean comes from the slope it stands on and the banks it overhangs,
  * which is the cheapest thing here that a reference photograph will show you.
  */
+/* P1 baked palettes: crown green per stand, blight-yellowing by fouling. */
+const CANOPY_COL = {
+  carrAlder: [0.09, 0.15, 0.035],
+  riverWillow: [0.13, 0.18, 0.05],
+  woodOak: [0.075, 0.135, 0.03],
+  woodSlender: [0.095, 0.15, 0.04],
+  beech: [0.07, 0.125, 0.032],
+  benchScatter: [0.10, 0.14, 0.045],
+  meadowSolo: [0.10, 0.16, 0.035],
+};
+function canopyCol(t) {
+  const base = CANOPY_COL[t.stand] ?? [0.22, 0.33, 0.15];
+  const v = 0.88 + (t.rot % 1) * 0.24;
+  const k = Math.min(1, t.fouling * 0.65);
+  return [
+    (base[0] * v) + (0.20 - base[0] * v) * k,
+    (base[1] * v) + (0.15 - base[1] * v) * k,
+    (base[2] * v) + (0.04 - base[2] * v) * k,
+  ];
+}
+const dimCol = (c, k) => [c[0] * k, c[1] * k, c[2] * k];
+const BARK_COL = [0.085, 0.055, 0.032];
+const DEAD_COL = [0.13, 0.10, 0.075];
+function rockCol(grey, moist = 0) {
+  const r = grey * 1.03, g = grey * 0.99, b = grey * 0.92;
+  const k = Math.max(0, Math.min(0.45, (moist - 0.55) * 1.4));
+  return [r + (0.12 - r) * k, g + (0.16 - g) * k, b + (0.04 - b) * k];
+}
+const COVER_COL = {
+  reed: [0.15, 0.19, 0.05],
+  tussock: [0.17, 0.19, 0.055],
+  brush: [0.10, 0.15, 0.04],
+  grass: [0.20, 0.21, 0.06],
+};
+function coverCol(gc) {
+  const base = COVER_COL[gc.kind] ?? [0.3, 0.36, 0.18];
+  const v = 0.90 + ((gc.rot * 7) % 1) * 0.20;
+  let [r, g, b] = [base[0] * v, base[1] * v, base[2] * v];
+  if ((gc.kind === "reed" || gc.kind === "tussock") && gc.foul > 0) {
+    const k = Math.min(1, gc.foul * 0.5);
+    r += (0.22 - r) * k; g += (0.17 - g) * k; b += (0.045 - b) * k;
+  }
+  return [r, g, b];
+}
+const PROP_COL = {
+  deck: [0.14, 0.095, 0.05],
+  pile: [0.06, 0.04, 0.025],
+  post: [0.11, 0.075, 0.04],
+  rail: [0.12, 0.08, 0.042],
+  log: [0.075, 0.05, 0.028],
+  mudwedge: [0.11, 0.075, 0.038],
+  boat: [0.07, 0.08, 0.04],
+  step: [0.13, 0.10, 0.06],
+  apron: [0.24, 0.22, 0.18],
+  approach: [0.15, 0.12, 0.07],
+};
+function propCol(p) {
+  if (p.grey !== undefined
+    && (p.kind === "plank" || p.kind === "log" || p.kind === "pile" || p.kind === "post" || p.kind === "rail")) {
+    const g = p.grey; // weathered wood keeps its per-piece variation, warmed
+    return [g * 0.52, g * 0.38, g * 0.24];
+  }
+  if (PROP_COL[p.kind]) return PROP_COL[p.kind];
+  const g = p.grey ?? 0.33;
+  return [g, g * 0.99, g * 0.97];
+}
+function caveCol(w) {
+  if (w.id === "cave.back") return [0.015, 0.015, 0.016];
+  if (w.id === "cave.floor") return [0.12, 0.095, 0.06];
+  const g = w.grey;
+  return [g * 1.02, g * 0.99, g * 0.93];
+}
 function buildStanding(pop) {
   const out = { pos: [], nrm: [], col: [], tris: 0 };
   for (const t of pop.trees) {
     const boleTop = t.height * (t.dead ? 0.52 : 0.42);
-    pushBox(out, t.x, t.y + boleTop / 2, t.z, t.bole * 0.42, boleTop / 2, t.bole * 0.42, t.rot, t.grey * 0.72, t.lean * 0.4, t.leanDir);
+    const bole = t.dead ? DEAD_COL : dimCol(BARK_COL, 0.9 + (t.rot % 1) * 0.2);
+    pushBox(out, t.x, t.y + boleTop / 2, t.z, t.bole * 0.42, boleTop / 2, t.bole * 0.42, t.rot, bole, t.lean * 0.4, t.leanDir);
     if (!t.dead) {
       const cy = t.height * 0.72;
-      pushBox(out, t.x, t.y + cy, t.z, t.crown * 0.50, t.crown * 0.30, t.crown * 0.50, t.rot, t.grey, t.lean, t.leanDir);
+      const crown = canopyCol(t);
+      pushBox(out, t.x, t.y + cy, t.z, t.crown * 0.50, t.crown * 0.30, t.crown * 0.50, t.rot, crown, t.lean, t.leanDir);
       pushBox(out, t.x + Math.cos(t.rot) * t.crown * 0.17, t.y + cy * 0.80, t.z + Math.sin(t.rot) * t.crown * 0.17,
-        t.crown * 0.37, t.crown * 0.23, t.crown * 0.39, t.rot * 1.7, t.grey * 0.92, t.lean, t.leanDir);
+        t.crown * 0.37, t.crown * 0.23, t.crown * 0.39, t.rot * 1.7, dimCol(crown, 0.92), t.lean, t.leanDir);
     } else {
       for (let k = 0; k < 3; k++) {
         const a = t.rot + k * 2.1;
         pushBox(out, t.x + Math.cos(a) * 1.0, t.y + boleTop + 0.45 + k * 0.5, t.z + Math.sin(a) * 1.0,
-          0.09, 0.85, 0.09, a, t.grey * 0.8, 0.45, a);
+          0.09, 0.85, 0.09, a, dimCol(DEAD_COL, 0.9), 0.45, a);
       }
     }
   }
   for (const b of pop.boulders) {
     pushBox(out, b.x, b.y + b.size * 0.42, b.z, b.size * 0.62, b.size * 0.40, b.size * 0.56,
-      b.rot, b.grey, b.pitch, b.roll);
+      b.rot, rockCol(b.grey, b.moist ?? 0), b.pitch, b.roll);
   }
   for (const gc of pop.groundCover) {
     const w = gc.width * 0.5, hh = gc.height;
+    const tint = coverCol(gc);
     for (let k = 0; k < 2; k++) {
       const yaw = gc.rot + k * Math.PI / 2;
       const dx = Math.cos(yaw) * w, dz = Math.sin(yaw) * w;
       const lx = gc.lean * hh, lz = -gc.lean * hh * 0.4;
       const a = [gc.x - dx, gc.y, gc.z - dz], b = [gc.x + dx, gc.y, gc.z + dz];
       const c = [gc.x + dx + lx, gc.y + hh, gc.z + dz + lz], d = [gc.x - dx + lx, gc.y + hh, gc.z - dz + lz];
-      pushQuad(out, a, b, c, d, gc.grey);
+      pushQuad(out, a, b, c, d, tint);
     }
   }
   return {
@@ -482,9 +597,8 @@ function buildStanding(pop) {
 function buildPropsAndCave(pop) {
   const out = { pos: [], nrm: [], col: [], tris: 0 };
   for (const p of pop.props) {
-    const grey = p.grey ?? 0.33;
     pushBox(out, p.x, p.y, p.z, p.size.x / 2, p.size.y / 2, p.size.z / 2,
-      p.yaw ?? p.rot ?? 0, grey, p.pitch ?? 0, p.roll ?? 0);
+      p.yaw ?? p.rot ?? 0, propCol(p), p.pitch ?? 0, p.roll ?? 0);
   }
 
   /* The mouth: piers, a lintel, a roof box, a floor, and a collar of radial
@@ -492,7 +606,7 @@ function buildPropsAndCave(pop) {
      punched into a wall. */
   const cave = pop.cave;
   for (const w of cave.front) {
-    pushBox(out, w.x, w.y, w.z, w.size.x / 2, w.size.y / 2, w.size.z / 2, w.rot, w.grey);
+    pushBox(out, w.x, w.y, w.z, w.size.x / 2, w.size.y / 2, w.size.z / 2, w.rot, caveCol(w));
   }
   const r = cave.arch.width / 2;
   const segs = 16;
@@ -503,7 +617,7 @@ function buildPropsAndCave(pop) {
     const along = -0.9 + (i % 2) * 0.5;
     const wx = cave.sill.x + (lx * Math.cos(-cave.yaw) - along * Math.sin(-cave.yaw));
     const wz = cave.sill.z + (lx * Math.sin(-cave.yaw) + along * Math.cos(-cave.yaw));
-    pushBox(out, wx, ly, wz, 0.62, 0.42, 1.2, cave.yaw, 0.63 - 0.05 * (i % 3));
+    pushBox(out, wx, ly, wz, 0.62, 0.42, 1.2, cave.yaw, rockCol(0.63 - 0.05 * (i % 3)));
   }
   return {
     attributes: {
@@ -561,7 +675,7 @@ async function main() {
     const blocks = { [name]: { attributes: {}, stats: g.stats } };
     const data = {};
     for (const [attr, arr] of Object.entries(g.attributes)) {
-      const comps = attr === "zone" ? 1 : attr === "waterData" ? 4 : 3;
+      const comps = attr === "zone" ? 1 : (attr === "waterData" || attr === "aField") ? 4 : 3;
       const count = arr.length / comps;
       blocks[name].attributes[attr] = { type: arr instanceof Uint16Array ? "u16" : "f32", components: comps, count };
       data[attr] = arr;
@@ -623,6 +737,12 @@ async function main() {
     contentHash: contentHash.digest("hex").slice(0, 16),
     bounds: WORLD.bounds,
     datum: WORLD.datum,
+    shading: {
+      phase: "P1",
+      groundFields: ["moisture", "fouling", "aboveWater", "canopy"],
+      materials: MATERIALS.map((m) => ({ id: m.id, tile: m.tile, textureSize: P1.textureSize })),
+      detail: { tile: P1.detailTile, size: P1.detailSize },
+    },
     files,
     zones: ZONES,
     stands: Object.fromEntries(Object.entries(STANDS).map(([k, v]) => [k, { name: v.name, height: v.height, crown: v.crown }])),

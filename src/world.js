@@ -72,35 +72,39 @@ export class WorldSector01 {
       // Manifest load optional; fallback coordinates already initialized
     }
 
-    // Material definitions for the photorealistic greybox
-    const groundMat = new THREE.MeshStandardMaterial({
-      vertexColors: true,
-      roughness: 0.94,
-      metalness: 0.02,
-      flatShading: true,
-    });
-
-    const waterMat = new THREE.MeshStandardMaterial({
-      vertexColors: true,
-      color: 0x426673,
-      transparent: true,
-      opacity: 0.88,
-      roughness: 0.16,
-      metalness: 0.12,
-    });
+    // P1 ground truth: the height-blended triplanar terrain over the procedural
+    // PBR library, with a greybox fallback if anything about it fails -- a
+    // working plain world beats a blank page on any GPU.
+    let groundMat;
+    let waterMat;
+    try {
+      const maxAniso = this.env.renderer?.capabilities?.getMaxAnisotropy?.() ?? 8;
+      const library = buildMaterialLibrary({ anisotropy: Math.min(8, maxAniso) });
+      this.footprints = new Footprints();
+      groundMat = createTerrainMaterial(library, this.footprints);
+      waterMat = createWaterMaterial();
+      this.waterMaterial = waterMat;
+    } catch (err) {
+      console.warn("[astra-world] P1 materials unavailable, using greybox fallback", err);
+      groundMat = new THREE.MeshStandardMaterial({
+        vertexColors: true, roughness: 0.94, metalness: 0.02, flatShading: true,
+      });
+      waterMat = new THREE.MeshStandardMaterial({
+        vertexColors: true, color: 0x426673, transparent: true, opacity: 0.88,
+        roughness: 0.16, metalness: 0.12,
+      });
+    }
 
     const standingMat = new THREE.MeshStandardMaterial({
       vertexColors: true,
-      roughness: 0.92,
-      metalness: 0.02,
-      flatShading: true,
+      roughness: 0.90,
+      metalness: 0.0,
     });
 
     const propsMat = new THREE.MeshStandardMaterial({
       vertexColors: true,
-      roughness: 0.86,
-      metalness: 0.04,
-      flatShading: true,
+      roughness: 0.85,
+      metalness: 0.0,
     });
 
     // Load the pre-compiled geometry files
@@ -152,6 +156,26 @@ export class WorldSector01 {
     }
 
     return this;
+  }
+
+  /**
+   * Per-frame world life: the water ripple's clock and the footprint tile
+   * following the walker. Called from the main loop; safe to skip headlessly.
+   */
+  update(dt, player) {
+    this.elapsed += dt;
+    if (this.waterMaterial?.userData.timeUniform) {
+      this.waterMaterial.userData.timeUniform.value = this.elapsed;
+    }
+    if (this.footprints && player) {
+      this.footprints.update(dt, player, (x, z) => {
+        const lvl = waterLevel(x, z);
+        return {
+          moisture: moisture(x, z),
+          above: lvl === null ? 8 : terrainHeight(x, z) - lvl,
+        };
+      });
+    }
   }
 }
 

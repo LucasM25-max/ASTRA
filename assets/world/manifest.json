@@ -7,7 +7,7 @@
   "format": 1,
   "builtAt": "unstamped",
   "generator": "tools/build_world.mjs",
-  "contentHash": "30487a779bbdda45",
+  "contentHash": "966f469f79c6711a",
   "bounds": {
     "minX": -150,
     "maxX": 1620,
@@ -15,10 +15,50 @@
     "maxZ": 300
   },
   "datum": 89,
+  "shading": {
+    "phase": "P1",
+    "groundFields": [
+      "moisture",
+      "fouling",
+      "aboveWater",
+      "canopy"
+    ],
+    "materials": [
+      {
+        "id": "loam",
+        "tile": 4,
+        "textureSize": 512
+      },
+      {
+        "id": "gravel",
+        "tile": 3,
+        "textureSize": 512
+      },
+      {
+        "id": "limestone",
+        "tile": 6,
+        "textureSize": 512
+      },
+      {
+        "id": "sludge",
+        "tile": 4,
+        "textureSize": 512
+      },
+      {
+        "id": "turf",
+        "tile": 3,
+        "textureSize": 512
+      }
+    ],
+    "detail": {
+      "tile": 0.4,
+      "size": 512
+    }
+  },
   "files": [
     {
       "file": "ground.geo",
-      "bytes": 23350810,
+      "bytes": 33182608,
       "block": "ground",
       "stats": {
         "vertices": 614484,
@@ -65582,6 +65622,6 @@
     "routeLength": 1593.22,
     "routeWetSamples": 11,
     "worldAreaHa": 194.7,
-    "buildSeconds": 24.55
+    "buildSeconds": 24.97
   }
 }
