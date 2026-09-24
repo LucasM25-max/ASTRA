@@ -1,5 +1,7 @@
 # ASTRA
 
+![the character standing, and mid-stride, in the empty world](docs/preview.png)
+
 A humanoid figure walking around a plain, empty 3D world. The character was
 modelled, rigged and animated in Blender (driven from a script); the world is
 three.js in the browser.
@@ -34,6 +36,7 @@ src/followCamera.js      third person camera
 public/assets/astra.glb  the character: mesh, 20 bone rig, six animations
 tools/                   everything used to build and verify the character
 vendor/three/            three.js 0.186, copied out of node_modules
+docs/preview.png         the character in the app's own camera framing
 ```
 
 ## How it works
