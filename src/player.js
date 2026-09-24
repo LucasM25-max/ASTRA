@@ -12,13 +12,15 @@ import { GAIT, MOVEMENT } from "./config.js";
 const UP = new THREE.Vector3(0, 1, 0);
 
 export class Player {
-  constructor(character, camera, domElement) {
+  constructor(character, camera, domElement, { getFloorHeight = null, initialPosition = null, initialHeading = 0 } = {}) {
     this.character = character;
     this.camera = camera;
     this.dom = domElement;
+    this.getFloorHeight = getFloorHeight;
 
     this.position = new THREE.Vector3(0, 0, 0);
-    this.heading = 0;             // radians, 0 = facing -Z
+    if (initialPosition) this.position.copy(initialPosition);
+    this.heading = initialHeading;             // radians, 0 = facing -Z
     this.speed = 0;               // horizontal, m/s
     this.vertical = 0;            // m/s, while airborne
     this.grounded = true;
@@ -125,11 +127,22 @@ export class Player {
       const forward = this._forward.set(-Math.sin(this.heading), 0, -Math.cos(this.heading));
       this.position.addScaledVector(forward, this.speed * dt);
     }
-    if (!this.grounded) {
+
+    const floor = this.getFloorHeight ? this.getFloorHeight(this.position.x, this.position.z) : 0;
+
+    if (this.grounded) {
+      if (floor < this.position.y - 0.45 && !this.jumping) {
+        this.grounded = false;
+        this.vertical = 0;
+        this.character.beginFall();
+      } else {
+        this.position.y = floor;
+      }
+    } else {
       this.vertical -= MOVEMENT.gravity * dt;
       this.position.y += this.vertical * dt;
-      if (this.position.y <= 0 && this.vertical < 0) {
-        this.position.y = 0;
+      if (this.position.y <= floor && this.vertical < 0) {
+        this.position.y = floor;
         this.vertical = 0;
         this.grounded = true;
         this.character.beginLand();
