@@ -8,7 +8,7 @@ armature, and given one Blender Action per locomotion state:
 
 Run it with the Blender Python module (pip install bpy) or inside Blender itself:
 
-    python tools/build_character.py            # writes public/assets/astra.glb
+    python tools/build_character.py            # writes assets/astra.glb
     blender -b -P tools/build_character.py     # same, from a Blender install
 
 Everything is authored from numbers, so the committed .glb can always be
@@ -35,7 +35,7 @@ FPS = 30
 OUT_PATH = os.environ.get(
     "ASTRA_CHARACTER_OUT",
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                 "public", "assets", "astra.glb"),
+                 "assets", "astra.glb"),
 )
 
 D = math.radians  # degrees -> radians

@@ -33,6 +33,6 @@ echo
 echo "Blender toolchain ready.  Use it like this:"
 echo
 echo "  export LD_LIBRARY_PATH=$STUBS"
-echo "  $PY tools/build_character.py   # rig + animate + export public/assets/astra.glb"
+echo "  $PY tools/build_character.py   # rig + animate + export assets/astra.glb"
 echo "  $PY tools/pose_debug.py        # numeric check of the clips (stride, foot plant)"
 echo "  $PY tools/render_preview.py    # contact sheet of the poses"

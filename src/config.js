@@ -52,4 +52,4 @@ export const CAMERA = {
   maxPitch: 0.95,
 };
 
-export const ASSET = "./public/assets/astra.glb";
+export const ASSET = "./assets/astra.glb";

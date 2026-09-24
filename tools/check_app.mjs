@@ -44,7 +44,7 @@ class StubTarget {
 }
 
 async function loadCharacter() {
-  const buffer = await readFile(join(root, "public", "assets", "astra.glb"));
+  const buffer = await readFile(join(root, "assets", "astra.glb"));
   const gltf = await new GLTFLoader().parseAsync(
     buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength), "");
   return { character: new Character(gltf), gltf };

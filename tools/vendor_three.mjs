@@ -4,36 +4,77 @@
  *
  *   npm install && npm run vendor
  *
- * vendor/three/three.module.js
- * vendor/three/three.core.js            (three.module.js imports it)
- * vendor/three/addons/loaders/GLTFLoader.js
+ * vendor/three/three.module.js                 build/three.module.js
+ * vendor/three/three.core.js                   build/three.core.js (imported by it)
+ * vendor/three/addons/...                      the closure of addon imports
+ *
+ * The addon list is not written by hand: GLTFLoader imports its own helpers
+ * ('../utils/BufferGeometryUtils.js', '../utils/SkeletonUtils.js'), and shipping
+ * the loader without them is a module the browser cannot resolve -- the page
+ * stays blank because main.js never runs. So the entries below are walked with
+ * tools/module_graph.mjs, and every import they reach is copied too.
  */
 
-import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join, posix, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { resolveSpecifier, specifiersOf } from "./module_graph.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const from = join(root, "node_modules", "three");
 const to = join(root, "vendor", "three");
 
-const files = [
+/** Build files, copied verbatim. */
+const BUILD = [
   ["build/three.module.js", "three.module.js"],
   ["build/three.core.js", "three.core.js"],
-  ["examples/jsm/loaders/GLTFLoader.js", "addons/loaders/GLTFLoader.js"],
 ];
+
+/** Addon entry points the app imports (see the import map in index.html). */
+const ADDONS = ["loaders/GLTFLoader.js"];
 
 const version = JSON.parse(await readFile(join(from, "package.json"), "utf8")).version;
 
-for (const [src, dst] of files) {
-  const target = join(to, dst);
+/* Everything copied out of the package: [source path, destination path]. */
+const copies = [...BUILD];
+
+for (const entry of ADDONS) {
+  const queue = [entry];
+  const seen = new Set();
+
+  while (queue.length) {
+    const addon = queue.shift();
+    if (seen.has(addon)) continue;
+    seen.add(addon);
+
+    const source = join(from, "examples/jsm", addon);
+    copies.push([join("examples/jsm", addon), posix.join("addons", addon)]);
+
+    for (const specifier of specifiersOf(await readFile(source, "utf8"))) {
+      // Addons may only import 'three' (mapped by index.html) or sibling files.
+      const resolved = resolveSpecifier(specifier, posix.join("examples/jsm", addon), {});
+      if (resolved.unmapped && specifier !== "three") {
+        throw new Error(
+          `${addon} imports ${JSON.stringify(specifier)}, which the import map ` +
+          `does not resolve -- the browser would fail to load it`);
+      }
+      if (resolved.path) queue.push(posix.relative("examples/jsm", resolved.path));
+    }
+  }
+}
+
+await rm(to, { recursive: true, force: true });
+
+for (const [source, destination] of copies) {
+  const target = join(to, destination);
   await mkdir(dirname(target), { recursive: true });
-  await copyFile(join(from, src), target);
-  console.log(`[vendor] three@${version} ${dst}`);
+  await copyFile(join(from, source), target);
+  console.log(`[vendor] three@${version} ${destination}`);
 }
 
 await writeFile(
   join(to, "VERSION"),
   `three@${version}\ncopied from node_modules by tools/vendor_three.mjs -- do not edit\n`,
 );
-console.log(`[vendor] done -- three@${version} vendored into vendor/three`);
+console.log(`[vendor] done -- three@${version} vendored into vendor/three (${copies.length} files)`);

@@ -12,7 +12,7 @@ import struct
 import sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GLB = os.environ.get("ASTRA_CHARACTER_GLB", os.path.join(HERE, "public", "assets", "astra.glb"))
+GLB = os.environ.get("ASTRA_CHARACTER_GLB", os.path.join(HERE, "assets", "astra.glb"))
 
 EXPECTED_ANIMS = {
     "idle": 3.0,
