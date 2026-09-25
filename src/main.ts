@@ -34,6 +34,7 @@ import { SceneManager, SceneState } from './core/SceneManager';
 import { TimeController, TimeState } from './core/TimeController';
 import { RenderPipeline } from './renderer/RenderPipeline';
 import { PhysicsWorld } from './physics/PhysicsWorld';
+import { MovementController } from './player/MovementController';
 import { WorldScene } from './world/WorldScene';
 import { DEFAULT_FOG_FAR, DEFAULT_FOG_NEAR } from './world/WorldScene';
 
@@ -47,6 +48,7 @@ export interface AstraDebugHandle {
   readonly renderPipeline: RenderPipeline;
   readonly physics: PhysicsWorld;
   readonly worldScene: WorldScene;
+  readonly movement: MovementController;
 }
 
 declare global {
@@ -125,6 +127,18 @@ async function boot(): Promise<void> {
     // The world: ground plane, sky dome, light rig, depth fog and the player.
     const worldScene = new WorldScene({ scene: renderPipeline.scene, physics });
 
+    // The player's movement: WASD, walk/run, jump, gravity and landing.
+    //
+    // It reads the render camera for its facing direction, which is what makes
+    // the controls camera-relative. Step 1.5 turns that camera into an orbit
+    // rig, and the controller needs no change for it.
+    const movement = new MovementController({
+      player: worldScene.player,
+      input: inputManager,
+      camera: renderPipeline.camera,
+      physics,
+    });
+
     // --- Wiring ------------------------------------------------------------
 
     // A paused scene freezes game time; leaving it restores the previous speed.
@@ -144,7 +158,14 @@ async function boot(): Promise<void> {
     // moves the simulation, which keeps Rapier deterministic and makes time
     // dilation work for free: when gameSpeed drops the engine issues fewer
     // fixed steps, and the world slows down with no special case anywhere.
+    //
+    // Movement is written before the world is stepped so the velocity it sets
+    // is the one Rapier integrates this step. The two are independent - neither
+    // reads the other's state - so the order is not load-bearing, but writing
+    // first reads more naturally: the controller decides where the player goes,
+    // then the world moves them there.
     engine.onFixedUpdate((delta) => {
+      movement.fixedUpdate(delta);
       worldScene.fixedUpdate(delta);
     });
 
@@ -183,6 +204,7 @@ async function boot(): Promise<void> {
       renderPipeline,
       physics,
       worldScene,
+      movement,
     };
 
     // --- Boot --------------------------------------------------------------

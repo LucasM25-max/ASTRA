@@ -12,6 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import { Box3, Frustum, Matrix4, Vector3 } from 'three';
+import { SceneState } from '../src/core/SceneManager';
 
 vi.mock('../src/renderer/RenderPipeline', async (importOriginal) => {
   // A real Scene, because WorldScene populates it for real.
@@ -278,5 +279,60 @@ describe('bootstrap physics (Step 1.3)', () => {
     expect(handle.physics.stepCount).toBeGreaterThan(steps);
     expect(handle.worldScene.player.position.y).toBeLessThan(1);
     expect(handle.worldScene.player.position.y).toBeGreaterThan(0.85);
+  });
+});
+
+describe('bootstrap movement (Step 1.4)', () => {
+  it('exposes a movement controller bound to the booted player', async () => {
+    await bootApp();
+    // Let the player settle out of its spawn height onto the ground.
+    for (let i = 0; i < 24; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    expect(handle.movement.player).toBe(handle.worldScene.player);
+    expect(handle.movement.isGrounded).toBe(true);
+    expect(handle.movement.horizontalSpeed).toBeCloseTo(0, 3);
+  });
+
+  it('walks the player with WASD through the booted engine loop', async () => {
+    await bootApp();
+    for (let i = 0; i < 12; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+    const start = { ...handle.worldScene.player.position };
+
+    // A real key event on the real window target the InputManager attached to.
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW', key: 'w' }));
+    for (let i = 0; i < 150; i += 1) await nextFrame();
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW', key: 'w' }));
+
+    // The default camera looks down -Z, so W carries the player to -Z.
+    expect(handle.worldScene.player.position.z).toBeLessThan(start.z - 3);
+    expect(Math.abs(handle.worldScene.player.position.x - start.x)).toBeLessThan(0.5);
+  });
+
+  it('does not move the player while the scene is paused', async () => {
+    await bootApp();
+    for (let i = 0; i < 24; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    handle.sceneManager.setState(SceneState.PAUSED);
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW', key: 'w' }));
+    for (let i = 0; i < 60; i += 1) await nextFrame();
+
+    // Pausing freezes game time, so no fixed steps are issued, so the player
+    // cannot move however hard the key is held.
+    const steps = handle.physics.stepCount;
+    const position = { ...handle.worldScene.player.position };
+    for (let i = 0; i < 60; i += 1) await nextFrame();
+
+    expect(handle.physics.stepCount).toBe(steps);
+    expect(handle.worldScene.player.position.z).toBe(position.z);
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW', key: 'w' }));
   });
 });

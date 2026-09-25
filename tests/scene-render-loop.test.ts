@@ -1,8 +1,12 @@
+// @vitest-environment jsdom
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Scene } from 'three';
+import { PerspectiveCamera, Scene } from 'three';
 import { Engine } from '../src/core/Engine';
 import { TimeController, TimeState } from '../src/core/TimeController';
+import { InputManager } from '../src/core/InputManager';
 import { PhysicsWorld } from '../src/physics/PhysicsWorld';
+import { MovementController, WALK_SPEED } from '../src/player/MovementController';
 import { PLAYER_HEIGHT } from '../src/player/Player';
 import { WorldScene } from '../src/world/WorldScene';
 
@@ -33,6 +37,10 @@ interface Rig {
   timeController: TimeController;
   world: WorldScene;
   physics: PhysicsWorld;
+  movement: MovementController;
+  /** Holds a key down across frames, the way a held key behaves. */
+  hold: (code: string) => void;
+  release: (code: string) => void;
   /** Counts render passes, standing in for RenderPipeline.render(). */
   renders: () => number;
   /** Runs one engine frame `ms` of wall-clock time later. */
@@ -40,17 +48,42 @@ interface Rig {
   dispose: () => void;
 }
 
-/** Wire a WorldScene into an Engine exactly the way main.ts does. */
+/**
+ * Wire a WorldScene *and* a MovementController into an Engine exactly the way
+ * main.ts does, driving a real InputManager from real KeyboardEvents on a
+ * throwaway target.
+ */
 async function createRig(): Promise<Rig> {
   const timeController = new TimeController();
   const engine = new Engine({ timeController });
   const physics = await PhysicsWorld.create({ timestep: engine.fixedTimeStep });
   const world = new WorldScene({ scene: new Scene(), physics });
 
+  const inputTarget = new EventTarget();
+  const input = new InputManager({ target: inputTarget, canvas: null });
+  input.attach();
+
+  const camera = new PerspectiveCamera(60, 1.6, 0.1, 2000);
+  camera.position.set(0, 2.2, 8);
+  camera.lookAt(0, 0.8, 0);
+  camera.updateMatrixWorld(true);
+
+  const movement = new MovementController({
+    player: world.player,
+    input,
+    camera,
+    physics,
+  });
+
   let renderCount = 0;
 
-  // Physics: fixed timestep only.
+  // Poll input once per frame, before anything reads it.
+  engine.onFrameStart(() => input.update());
+
+  // Physics: fixed timestep only. Movement is written first so the velocity it
+  // sets is the one Rapier integrates this step - the order main.ts uses.
   engine.onFixedUpdate((delta) => {
+    movement.fixedUpdate(delta);
     world.fixedUpdate(delta);
   });
 
@@ -65,14 +98,25 @@ async function createRig(): Promise<Rig> {
     engine.advance(now);
   };
 
+  const hold = (code: string): void => {
+    inputTarget.dispatchEvent(new KeyboardEvent('keydown', { code, key: code }));
+  };
+  const release = (code: string): void => {
+    inputTarget.dispatchEvent(new KeyboardEvent('keyup', { code, key: code }));
+  };
+
   return {
     engine,
     timeController,
     world,
     physics,
+    movement,
+    hold,
+    release,
     renders: () => renderCount,
     step,
     dispose: () => {
+      input.dispose();
       world.dispose();
       physics.dispose();
     },
@@ -330,5 +374,95 @@ describe('render loop -> fixed timestep -> physics', () => {
 
     expect(rig.physics.timestep).toBeCloseTo(rig.engine.fixedTimeStep, 6);
     expect(rig.physics.timestep).toBeCloseTo(1 / 60, 6);
+  });
+});
+
+/**
+ * Step 1.4 asks for all player movement to be multiplied by
+ * TimeController.gameSpeed so that time dilation slows the player during
+ * combat. The multiplication is not in the controller - it is in the engine,
+ * which feeds its accumulator the *scaled* delta and so issues a quarter of the
+ * fixed steps when dilated. These tests prove the player is actually driven by
+ * that loop, through the same wiring main.ts uses.
+ */
+describe('render loop -> MovementController -> player', () => {
+  it('walks the player at the configured speed while the loop runs', async () => {
+    rig = await createRig();
+    rig.engine.start();
+    rig.step(16); // seed frame
+    rig.hold('KeyW');
+
+    for (let i = 0; i < 120; i += 1) rig.step(16);
+
+    // The default camera looks down -Z, so W carries the player to -Z.
+    expect(rig.world.player.position.z).toBeLessThan(-3);
+    expect(rig.movement.horizontalSpeed).toBeCloseTo(WALK_SPEED, 2);
+    rig.release('KeyW');
+  });
+
+  it('jumps the player off the ground and lands it again', async () => {
+    rig = await createRig();
+    rig.engine.start();
+    rig.step(16);
+    // Let the player settle onto the ground first, so `rest` is the resting
+    // height rather than the spawn height.
+    for (let i = 0; i < 60; i += 1) rig.step(16);
+    const rest = rig.world.player.position.y;
+
+    rig.hold('Space');
+    rig.step(16);
+    rig.release('Space');
+    expect(rig.movement.isGrounded).toBe(false);
+
+    for (let i = 0; i < 120; i += 1) rig.step(16);
+    expect(rig.movement.isGrounded).toBe(true);
+    expect(rig.world.player.position.y).toBeCloseTo(rest, 2);
+  });
+
+  it('slows the player to a quarter speed when time is dilated', async () => {
+    const full = await createRig();
+    full.engine.start();
+    full.step(16);
+    full.hold('KeyW');
+    for (let i = 0; i < 480; i += 1) full.step(16);
+    const fullDistance = Math.abs(full.world.player.position.z);
+    full.release('KeyW');
+    full.dispose();
+
+    const dilated = await createRig();
+    dilated.engine.start();
+    dilated.step(16);
+    dilated.timeController.setState(TimeState.DILATED, 0);
+    dilated.hold('KeyW');
+    for (let i = 0; i < 480; i += 1) dilated.step(16);
+    const dilatedDistance = Math.abs(dilated.world.player.position.z);
+    dilated.release('KeyW');
+    dilated.dispose();
+
+    // Same wall-clock time, a quarter of the game time, a quarter of the
+    // distance - with nothing in the controller referencing gameSpeed.
+    expect(dilatedDistance).toBeGreaterThan(0);
+    expect(dilatedDistance / fullDistance).toBeCloseTo(0.25, 1);
+  });
+
+  it('freezes the player completely when time is paused', async () => {
+    rig = await createRig();
+    rig.engine.start();
+    rig.step(16);
+    rig.hold('KeyW');
+    for (let i = 0; i < 120; i += 1) rig.step(16);
+    const steps = rig.physics.stepCount;
+    const position = { ...rig.world.player.position };
+
+    rig.timeController.setState(TimeState.PAUSED, 0);
+    for (let i = 0; i < 60; i += 1) rig.step(16);
+
+    // No fixed steps means no movement, but the renderer keeps drawing.
+    expect(rig.physics.stepCount).toBe(steps);
+    expect(rig.world.player.position.x).toBe(position.x);
+    expect(rig.world.player.position.y).toBe(position.y);
+    expect(rig.world.player.position.z).toBe(position.z);
+    expect(rig.renders()).toBeGreaterThan(180);
+    rig.release('KeyW');
   });
 });

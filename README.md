@@ -24,6 +24,16 @@ The full build plan lives in [`plan.md`](./plan.md).
   with the visual plane, gravity at -9.81 m/s², and a spawn point of (0, 1, 0).
   Physics runs on the engine's fixed timestep, so it is deterministic and slows
   and freezes with time dilation for free.
+- **Step 1.4 — Movement Controller** (complete): WASD relative to the camera
+  facing, walk at 3.5 m/s and run at 6 m/s on Shift, acceleration and
+  deceleration as bounded rates rather than per-frame lerps, the character mesh
+  turning to face its direction of travel at a limited rate, and a jump with a
+  downward raycast ground check. Slopes do not slide: the walk target is
+  projected into the surface plane so ground speed survives the gradient, and
+  gravity is switched off on the player's body while it is grounded so the
+  contact solver has nothing to correct. Time dilation needs nothing here — the
+  engine issues a quarter of the fixed steps when dilated, and the player slows
+  with the world.
 
 ---
 
@@ -182,7 +192,7 @@ __ASTRA__.physics.stepCount            // fixed steps taken so far
 - **Boot is async.** Rapier's WASM must be initialised before a `World` can
   exist, so `main.ts` exports a `ready` promise that tests await. `index.html`
   needs no change — the module auto-starts.
-- 198 tests across 16 files, including a jsdom integration test that runs the
+- 238 tests across 17 files, including a jsdom integration test that runs the
   real `main.ts` bootstrap end to end.
 
 ---
