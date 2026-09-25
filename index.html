@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="description" content="ASTRA - a 3D action-adventure RPG based on Dungeons & Dragons 5e (2024)." />
+    <title>ASTRA &mdash; A D&amp;D Adventure</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #05070a;
+      }
+
+      body {
+        font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
+        color: #f0d9a8;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* Fullscreen game canvas: fills the viewport and never scrolls. */
+      #game-canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        touch-action: none;
+        outline: none;
+      }
+
+      /* Shown only when the engine fails to boot (e.g. no WebGL available). */
+      #boot-error {
+        position: fixed;
+        inset: 0;
+        display: none;
+        place-content: center;
+        padding: 2rem;
+        text-align: center;
+        background: #05070a;
+      }
+
+      #boot-error:not([hidden]) {
+        display: grid;
+      }
+
+      #boot-error h1 {
+        margin: 0 0 1rem;
+        font-size: 1.5rem;
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      #boot-error pre {
+        margin: 0;
+        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        font-size: 0.85rem;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        opacity: 0.75;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game-canvas"></canvas>
+
+    <div id="boot-error" hidden>
+      <div>
+        <h1>ASTRA could not start</h1>
+        <pre id="boot-error-message"></pre>
+      </div>
+    </div>
+
+    <noscript>ASTRA requires JavaScript and a WebGL-capable browser.</noscript>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
