@@ -217,10 +217,12 @@ export function buildBoulders() {
     const size = lerp(0.5, 2.6, Math.pow(rand(), 1.5)) * (zone === 7 ? 1.25 : 1)
       * (1 + 0.35 * ramp(slope, 12, 38));
     if (nearCave < 9) continue;
+    const moist = moisture(p.x, p.z);
     out.push({
       x: p.x, z: p.z, y: terrainHeight(p.x, p.z) - size * lerp(0.05, 0.32, rand()),
       size, rot: rand() * Math.PI * 2, pitch: (rand() - 0.5) * 0.5, roll: (rand() - 0.5) * 0.5,
-      grey: clamp(0.66 + 0.16 * rand() - 0.12 * moisture(p.x, p.z), 0.35, 0.86),
+      grey: clamp(0.66 + 0.16 * rand() - 0.12 * moist, 0.35, 0.86),
+      moist,
     });
   }
   /* The fan the mouth pushes out, and the lip the stream drops over: deliberately
@@ -279,7 +281,7 @@ export function buildGroundCover() {
       rot: rand() * 6.28, lean: (rand() - 0.5) * 0.5,
       grey: clamp((kind === "reed" ? 0.36 : kind === "tussock" ? 0.40 : 0.44)
         + 0.12 * (rand() - 0.5) - 0.10 * foul + (kind === "grass" ? 0.18 : 0), 0.12, 0.70),
-      density,
+      density, foul,
     });
   }
   return out;

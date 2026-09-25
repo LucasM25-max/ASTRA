@@ -6,7 +6,7 @@
 **Sector Scope:** Sector 01: *The First Fork* and *Journey Upstream*  
 **Engine & Stack:** Three.js (ES Modules, WebGL2 / WebGPU-ready PBR), Node.js Toolchain, Custom AGEO Binary Geometry Container  
 **Target Experience:** Photorealistic AAA 3D Action-Adventure RPG Environment  
-**Active Milestone:** Phase P0 Completed & Verified; Transitioning to Phase P1  
+**Active Milestone:** Phase P1 Completed & Verified; Transitioning to Phase P2  
 **Last Updated:** September 2026
 
 ---
@@ -229,8 +229,8 @@ The production pipeline implements a **Field-Driven Triplanar Blending of High-F
 2026 ROADMAP OVERVIEW
 ==========================================================================================
 Phase P0: Metric Greybox & Hydrological Foundation       [### COMPLETED & VERIFIED ###]
-Phase P1: Ground Truth Shading & Image Texture Pipeline  [>> NEXT ACTIVE SPRINT <<]
-Phase P2: Photorealistic Foliage & Canopy Architecture   [PLANNED]
+Phase P1: Ground Truth Shading & Image Texture Pipeline  [### COMPLETED & VERIFIED ###]
+Phase P2: Photorealistic Foliage & Canopy Architecture   [>> NEXT ACTIVE SPRINT <<]
 Phase P3: Dynamic Hydrology, Flow Fields & Turbidity    [PLANNED]
 Phase P4: Greyhawk Atmospheric Fog & Micro-Ecology       [PLANNED]
 Phase P5: Diegetic Storytelling, Polish & Optimization   [PLANNED]
@@ -241,6 +241,12 @@ Phase P5: Diegetic Storytelling, Polish & Optimization   [PLANNED]
 
 ### Phase P1: Ground Truth Shading & Image Texture Pipeline
 **Objective:** Transform the metric greybox terrain into a photorealistic, physically plausible ground surface using the hybrid PBR material pipeline.
+**Status: COMPLETE & VERIFIED** (September 2026) — all four tasks delivered and held to account by `tools/check_p1.mjs` (40 checks, part of `npm run check`):
+* Task 1.1 delivered as a deterministic procedural PBR library (`src/world/textures.js`) instead of acquired 2K/4K maps: 5 materials × (albedo + normal + packed roughness/height/AO) at 512 px, seamless-tiled and byte-stable across runs, plus a 512 px micro-detail tile. Procedural keeps the deploy a static ES-module tree with zero binary texture payload.
+* Task 1.2 delivered via `MeshStandardMaterial.onBeforeCompile` injection (`src/world/terrainMaterial.js`) rather than a bespoke `ShaderMaterial`, so terrain keeps the standard pipeline's lights, shadows and fog: height-blended (k = 0.2) triplanar on slopes > 22°, planar on terraces, world-space macro variation, 47 texture fetches (inside the 48-fetch budget).
+* Task 1.3 delivered as the capillary fringe (40% albedo darkening, roughness → 0.08 within 0.35 m above water) plus a 256 px wet-mud footprint tile stamped where moisture > 0.7 (`src/world/footprints.js`), driven by the per-vertex `aField = [moisture, fouling, aboveWater, canopy]` attribute baked by `tools/build_world.mjs`.
+* Task 1.4 delivered as the `check_p1.mjs` suite: determinism + seamless-tiling hashes, splat partition-of-unity over 2000 corridor samples, biome-ownership probes, ≥ 12 px/cm micro-detail density within 15 m, VRAM ≤ 1.8 GB (~92 MB actual), and shader-assembly checks. Textures were additionally eyeball-verified tile by tile (headless PNG dumps) and retuned ~2–4× darker to true linear reflectance after round-1 previews rendered washed out.
+* Water remains the P1 holding pattern (depth absorption + time-rippled normals); full flow fields, Snell/Fresnel reflections and the confluence plume are P3 scope.
 
 * **Task 1.1: Tiling Material Library Integration**
   * Acquire and author 5 calibrated 2K/4K PBR material texture sets (Flanaess forest loam, river shingle gravel, bedded karst limestone, waterlogged riparian silt, blighted necrotic mire).
@@ -373,7 +379,7 @@ npm run check:deploy    # Audits module graph, relative links, assets
 | Phase | Title | Primary Deliverable | Status |
 | :--- | :--- | :--- | :--- |
 | **P0** | **Metric Greybox World** | Vector geography, analytical relief, binary geometry, 23 checkpoints, collision engine, automated audit suite. | **100% COMPLETE** |
-| **P1** | **Ground Truth Shading** | 5-material PBR library, height-blended triplanar shaders, field splatting, capillary wetness, texel density audit. | **NEXT UP** |
+| **P1** | **Ground Truth Shading** | 5-material PBR library, height-blended triplanar shaders, field splatting, capillary wetness, texel density audit. | **100% COMPLETE** |
 | **P2** | **Photorealistic Foliage** | Oerth botanical models (Alder, Bronzewood, Beech, Willow), 3-tier LOD instancing, wind vertex animation, SSS canopy shaders. | Planned |
 | **P3** | **Dynamic Hydrology** | 2D vector flow fields, Snell/Fresnel reflection water shader, Kelvin-Helmholtz mixing plume, procedural foam rapids. | Planned |
 | **P4** | **Atmosphere & Ecology** | Volumetric sun shafts, height-fog in hollows, dynamic LUT color grading, micro-fauna GPU particles, 3D spatial audio zones. | Planned |

@@ -59,6 +59,7 @@ async function boot() {
     previous = now;
 
     player.update(dt);
+    sector?.update?.(dt, player);
     character.update(dt);
     camera.update(dt, player.travelDirection());
     world.trackShadow(player.position);
