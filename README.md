@@ -19,6 +19,11 @@ The full build plan lives in [`plan.md`](./plan.md).
   100m x 100m green ground plane, a directional sun plus ambient fill, a
   perspective camera, a blue-to-white gradient skybox and linear fog — all driven
   through `TimeController.getDelta()`.
+- **Step 1.3 — Player Character (Capsule Prototype)** (complete): a capsule mesh
+  standing on a dynamic Rapier capsule collider, a static ground collider level
+  with the visual plane, gravity at -9.81 m/s², and a spawn point of (0, 1, 0).
+  Physics runs on the engine's fixed timestep, so it is deterministic and slows
+  and freezes with time dilation for free.
 
 ---
 
@@ -50,13 +55,17 @@ src/
 │   ├── InputManager.ts            Keyboard + mouse capture
 │   ├── SceneManager.ts            Macro state machine
 │   └── TimeController.ts          Game time, dilation and pause
+├── physics/
+│   └── PhysicsWorld.ts            Rapier world, gravity, ground + capsule colliders
+├── player/
+│   └── Player.ts                  Capsule mesh + dynamic body, synced per frame
 ├── renderer/
 │   ├── RenderPipeline.ts          WebGLRenderer, scene graph, camera, resizing
 │   ├── LightingSystem.ts          Sun + ambient fill
 │   └── SkySystem.ts               Gradient sky dome
 └── world/
     ├── Terrain.ts                 The ground plane
-    └── WorldScene.ts              Composes terrain + sky + lights + fog
+    └── WorldScene.ts              Composes terrain + sky + lights + fog + player
 ```
 
 ### The loop
@@ -74,6 +83,27 @@ The simulation runs on a fixed timestep so physics and animation stay
 deterministic at any frame rate; rendering runs at whatever rate the browser
 provides so the camera stays smooth. If the substep cap is hit, the backlog is
 dropped — a slow machine degrades into slow motion instead of a death spiral.
+
+### Simulation vs presentation
+
+`WorldScene` splits its update in two, and the split is load-bearing:
+
+```ts
+engine.onFixedUpdate((dt) => worldScene.fixedUpdate(dt));  // physics, fixed 1/60
+engine.onRender(() => {
+  worldScene.update(timeController.getDelta());            // presentation
+  renderPipeline.render();
+});
+```
+
+Physics only ever moves on the fixed path. The render path reconciles meshes with
+bodies and advances the sky, and never touches the simulation — a variable frame
+delta fed into Rapier would make it inaccurate and non-deterministic.
+
+Time dilation needs no special case anywhere: when `gameSpeed` drops the
+accumulator fills more slowly, fixed steps simply happen less often, and the
+world slows down. Pause means zero fixed steps, so physics stops dead while the
+renderer keeps drawing.
 
 ### Time dilation
 
@@ -124,21 +154,35 @@ Temporary key bindings (replaced by the Step 1.6 debug overlay):
 | `P` | Toggle the `PAUSED` scene state (freezes game time via the event wiring) |
 
 While time is dilated or paused, the sky's slow gradient drift slows and stops
-with it — a visible confirmation that the world really is reading its delta from
-the `TimeController` and not from the engine.
+with it — and so does the player's fall — a visible confirmation that the world
+really is reading its delta from the `TimeController` and not from the engine.
+
+```js
+__ASTRA__.worldScene.player.position   // { x, y, z } of the capsule's centre
+__ASTRA__.physics.gravity              // { x: 0, y: -9.81, z: 0 }
+__ASTRA__.physics.stepCount            // fixed steps taken so far
+```
 
 ---
 
 ## Notes
 
-- **Rapier** is installed as `@dimforge/rapier3d-compat`: it ships its WASM inline,
-  so it works in Vite, in Node and in the test runner with no bundler plugins.
-  Physics bodies arrive in Step 1.3.
+- **Rapier** is installed as `@dimforge/rapier3d-compat`: it ships its ~3 MB WASM
+  inline as base64, so it works in Vite, in Node and in the test runner with no
+  bundler plugins. The cost is bundle size — the production bundle is ~4.9 MB
+  (~1.8 MB gzipped), almost all of it that base64. Switching to
+  `@dimforge/rapier3d` would emit the WASM as a separate, stream-compilable,
+  independently cacheable asset (~250 kB of JS plus a 3 MB `.wasm`), at the price
+  of wasm-loader configuration and a test-runner setup that no longer works out
+  of the box. `vite.config.ts` documents the trade-off where the limit is set.
 - Versions are pinned exactly to keep agent-driven builds reproducible.
 - `node_modules/` and `dist/` are git-ignored. Note that `node_modules/` is also
   outside the sandbox's persisted snapshot, so run `npm ci` (or `npm install`)
   after any environment reset before building or testing.
-- 154 tests across 14 files, including a jsdom integration test that runs the
+- **Boot is async.** Rapier's WASM must be initialised before a `World` can
+  exist, so `main.ts` exports a `ready` promise that tests await. `index.html`
+  needs no change — the module auto-starts.
+- 198 tests across 16 files, including a jsdom integration test that runs the
   real `main.ts` bootstrap end to end.
 
 ---

@@ -87,7 +87,7 @@ export class Engine {
   readonly eventBus: EventBus;
   readonly timeController: TimeController;
 
-  private readonly fixedTimeStep: number;
+  private readonly _fixedTimeStep: number;
   private readonly maxSubSteps: number;
   private readonly maxFrameDelta: number;
 
@@ -118,7 +118,7 @@ export class Engine {
   constructor(options: EngineOptions = {}) {
     this.eventBus = options.eventBus ?? new EventBus();
     this.timeController = options.timeController ?? new TimeController({ eventBus: this.eventBus });
-    this.fixedTimeStep =
+    this._fixedTimeStep =
       options.fixedTimeStep !== undefined && options.fixedTimeStep > 0
         ? options.fixedTimeStep
         : DEFAULT_FIXED_TIME_STEP;
@@ -146,6 +146,16 @@ export class Engine {
 
   get fps(): number {
     return this.frameInfo.fps;
+  }
+
+  /**
+   * The simulation step, in seconds.
+   *
+   * Exposed so physics can be built with a matching timestep. Anything driven
+   * by `onFixedUpdate` should use this value verbatim.
+   */
+  get fixedTimeStep(): number {
+    return this._fixedTimeStep;
   }
 
   /** Start the loop. Safe to call when already running. */
@@ -246,14 +256,14 @@ export class Engine {
     // Fixed timestep simulation.
     this.accumulator += gameDelta;
     let steps = 0;
-    while (this.accumulator >= this.fixedTimeStep && steps < this.maxSubSteps) {
-      this.accumulator -= this.fixedTimeStep;
+    while (this.accumulator >= this._fixedTimeStep && steps < this.maxSubSteps) {
+      this.accumulator -= this._fixedTimeStep;
       steps += 1;
       for (const listener of this.fixedListeners) {
         listener(this.fixedTimeStep);
       }
     }
-    if (this.accumulator >= this.fixedTimeStep) {
+    if (this.accumulator >= this._fixedTimeStep) {
       // Hit the substep cap with time still outstanding: drop the backlog so a
       // slow machine degrades into slow motion instead of a death spiral.
       this.accumulator = 0;
@@ -273,7 +283,7 @@ export class Engine {
     info.realDelta = realDelta;
     info.gameDelta = gameDelta;
     info.fixedSteps = steps;
-    info.alpha = this.accumulator / this.fixedTimeStep;
+    info.alpha = this.accumulator / this._fixedTimeStep;
     info.elapsed = this.timeController.elapsed;
     info.realElapsed = this.timeController.realElapsed;
     info.gameSpeed = this.timeController.gameSpeed;
