@@ -10,18 +10,15 @@ The full build plan lives in [`plan.md`](./plan.md).
 
 ## Status
 
-**Phase 1, Step 1.1 — Project Bootstrap** (complete)
+**Phase 1 — Player Walking Around in Blank World**
 
-- Vite + TypeScript project with strict compiler settings
-- Three.js (rendering) and Rapier.js (physics) installed
-- Fullscreen canvas in `index.html`
-- Main game loop with a fixed-timestep simulation and a variable-rate render
-- `SceneManager` macro state machine: `LOADING`, `MAIN_MENU`, `GAME_MODE_SELECT`,
-  `GAMEPLAY`, `PAUSED`, `CINEMATIC`
-- `InputManager` for keyboard + mouse (polling **and** events)
-- `TimeController` — the single source of truth for game time, with
-  `REALTIME` / `DILATED` / `PAUSED` states and lerped speed transitions
-- `EventBus` — typed, decoupled publish/subscribe for every cross-system message
+- **Step 1.1 — Project Bootstrap** (complete): Vite + TypeScript, Three.js and
+  Rapier, fullscreen canvas, fixed-timestep game loop, `SceneManager`,
+  `InputManager`, `TimeController`, `EventBus`.
+- **Step 1.2 — Basic 3D Scene** (complete): antialiased WebGL renderer, a flat
+  100m x 100m green ground plane, a directional sun plus ambient fill, a
+  perspective camera, a blue-to-white gradient skybox and linear fog — all driven
+  through `TimeController.getDelta()`.
 
 ---
 
@@ -46,15 +43,20 @@ npm run dev        # http://localhost:5173
 
 ```
 src/
-├── main.ts                     Entry point: builds and wires the core services
+├── main.ts                        Entry point: builds and wires the core services
 ├── core/
-│   ├── Engine.ts               Fixed timestep + variable render loop
-│   ├── EventBus.ts             Typed publish/subscribe (the event contract)
-│   ├── InputManager.ts         Keyboard + mouse capture
-│   ├── SceneManager.ts         Macro state machine
-│   └── TimeController.ts       Game time, dilation and pause
-└── renderer/
-    └── RenderPipeline.ts       WebGLRenderer, scene graph, camera, resizing
+│   ├── Engine.ts                  Fixed timestep + variable render loop
+│   ├── EventBus.ts                Typed publish/subscribe (the event contract)
+│   ├── InputManager.ts            Keyboard + mouse capture
+│   ├── SceneManager.ts            Macro state machine
+│   └── TimeController.ts          Game time, dilation and pause
+├── renderer/
+│   ├── RenderPipeline.ts          WebGLRenderer, scene graph, camera, resizing
+│   ├── LightingSystem.ts          Sun + ambient fill
+│   └── SkySystem.ts               Gradient sky dome
+└── world/
+    ├── Terrain.ts                 The ground plane
+    └── WorldScene.ts              Composes terrain + sky + lights + fog
 ```
 
 ### The loop
@@ -82,9 +84,12 @@ read it through `TimeController.getDelta()`:
 const delta = timeController.getDelta();   // engineDelta * gameSpeed
 ```
 
-Speed transitions are interpolated over **real** time, never game time — if they
-were interpolated in game time, slowing the game would also slow the ramp, and a
-paused game could never speed back up.
+`WorldScene.update()` takes that scaled delta, which is why the whole world
+slows and freezes with the `PAUSED` / `DILATED` states while rendering itself
+keeps running at full frame rate. Speed transitions are interpolated over
+**real** time, never game time — if they were interpolated in game time,
+slowing the game would also slow the ramp, and a paused game could never speed
+back up.
 
 The camera and the UI are deliberately exempt: they keep running at full speed so
 the player can still look around freely during slowed time, which is what makes
@@ -103,9 +108,11 @@ Listeners are isolated, so a throwing handler can never break the game loop.
 With `npm run dev` running, open the browser console:
 
 ```js
-__ASTRA__.sceneManager.current          // 'MAIN_MENU' after the first frame
-__ASTRA__.timeController.gameSpeed      // 1
-__ASTRA__.timeController.setState('DILATED')
+__ASTRA__.sceneManager.current                    // 'MAIN_MENU' after the first frame
+__ASTRA__.worldScene.elapsedTime                  // advances every frame
+__ASTRA__.worldScene.fog                          // Fog { near: 25, far: 60 }
+__ASTRA__.timeController.gameSpeed                // 1
+__ASTRA__.timeController.setState('DILATED')      // the world slows to 25%
 __ASTRA__.engine.fps
 ```
 
@@ -116,6 +123,10 @@ Temporary key bindings (replaced by the Step 1.6 debug overlay):
 | `1` / `2` / `3` | Time state: `REALTIME` / `DILATED` / `PAUSED` |
 | `P` | Toggle the `PAUSED` scene state (freezes game time via the event wiring) |
 
+While time is dilated or paused, the sky's slow gradient drift slows and stops
+with it — a visible confirmation that the world really is reading its delta from
+the `TimeController` and not from the engine.
+
 ---
 
 ## Notes
@@ -124,7 +135,11 @@ Temporary key bindings (replaced by the Step 1.6 debug overlay):
   so it works in Vite, in Node and in the test runner with no bundler plugins.
   Physics bodies arrive in Step 1.3.
 - Versions are pinned exactly to keep agent-driven builds reproducible.
-- `dist/` and `node_modules/` are git-ignored.
+- `node_modules/` and `dist/` are git-ignored. Note that `node_modules/` is also
+  outside the sandbox's persisted snapshot, so run `npm ci` (or `npm install`)
+  after any environment reset before building or testing.
+- 154 tests across 14 files, including a jsdom integration test that runs the
+  real `main.ts` bootstrap end to end.
 
 ---
 

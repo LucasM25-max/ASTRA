@@ -12,7 +12,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 
-vi.mock('../src/renderer/RenderPipeline', () => {
+vi.mock('../src/renderer/RenderPipeline', async () => {
+  // A real Scene, because WorldScene (Step 1.2) populates it for real.
+  const { PerspectiveCamera, Scene } = await import('three');
+
   class RenderPipelineStub {
     renderer = {
       domElement: null,
@@ -22,13 +25,8 @@ vi.mock('../src/renderer/RenderPipeline', () => {
       setSize: vi.fn(),
       setClearColor: vi.fn(),
     };
-    scene = {};
-    camera = {
-      position: { set: vi.fn() },
-      lookAt: vi.fn(),
-      aspect: 1,
-      updateProjectionMatrix: vi.fn(),
-    };
+    scene = new Scene();
+    camera = new PerspectiveCamera(60, 1.6, 0.1, 2000);
     size = { width: 800, height: 600 };
     render = vi.fn();
     resize = vi.fn();
@@ -66,6 +64,12 @@ describe('bootstrap (src/main.ts)', () => {
     expect(handle?.engine.isRunning).toBe(true);
     expect(handle?.inputManager.isAttached).toBe(true);
     expect(handle?.sceneManager.current).toBe('LOADING');
+
+    // Step 1.2: the world is built and attached to the renderer's scene.
+    expect(handle?.worldScene.isDisposed).toBe(false);
+    expect(handle?.worldScene.terrain.sizeMetres).toBe(100);
+    expect(handle?.worldScene.fog).not.toBeNull();
+    expect(handle?.renderPipeline.scene.children).toContain(handle?.worldScene.sky.mesh);
   });
 
   it('leaves LOADING and enters MAIN_MENU on the first rendered frame', async () => {
@@ -77,6 +81,26 @@ describe('bootstrap (src/main.ts)', () => {
     expect(handle?.sceneManager.current).toBe('MAIN_MENU');
     expect(handle?.sceneManager.previous).toBe('LOADING');
     expect(handle?.sceneManager.changeCount).toBe(1);
+  });
+
+  it('advances the world through the TimeController delta', async () => {
+    await import('../src/main');
+    await nextFrame();
+    await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    // The sky only moves because the render loop feeds it game time.
+    expect(handle.worldScene.elapsedTime).toBeGreaterThan(0);
+    expect(handle.worldScene.sky.elapsedTime).toBeCloseTo(handle.worldScene.elapsedTime, 6);
+
+    // Freezing game time must freeze the world while rendering continues.
+    handle.timeController.setState('PAUSED', 0);
+    await nextFrame();
+    const frozen = handle.worldScene.elapsedTime;
+    await nextFrame();
+    expect(handle.worldScene.elapsedTime).toBe(frozen);
   });
 
   it('renders through the pipeline exactly once per frame', async () => {

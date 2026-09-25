@@ -109,6 +109,20 @@ describe('TimeController', () => {
       expect(time.gameSpeed).toBeCloseTo(0.25, 6);
     });
 
+    it('settles cleanly even when the deltas do not sum exactly', () => {
+      // These deltas sum to 0.5s but leave ~1e-17 on the clock in float64; the
+      // transition must still report itself as finished.
+      const time = new TimeController();
+      time.setSpeed(0.25, 0.5);
+
+      for (const delta of [0.1, 0.1, 0.05, 0.1, 0.1, 0.05]) {
+        time.update(delta);
+      }
+
+      expect(time.gameSpeed).toBeCloseTo(0.25, 6);
+      expect(time.isTransitioning).toBe(false);
+    });
+
     it('re-ramps smoothly from the current speed when interrupted', () => {
       const time = new TimeController();
       time.setSpeed(0.25, 1);

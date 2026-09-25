@@ -24,6 +24,7 @@ import { InputManager } from './core/InputManager';
 import { SceneManager, SceneState } from './core/SceneManager';
 import { TimeController, TimeState } from './core/TimeController';
 import { RenderPipeline } from './renderer/RenderPipeline';
+import { DEFAULT_FOG_FAR, DEFAULT_FOG_NEAR, WorldScene } from './world/WorldScene';
 
 /** Console handle: `window.__ASTRA__.timeController.gameSpeed`, and so on. */
 export interface AstraDebugHandle {
@@ -33,6 +34,7 @@ export interface AstraDebugHandle {
   readonly sceneManager: SceneManager;
   readonly inputManager: InputManager;
   readonly renderPipeline: RenderPipeline;
+  readonly worldScene: WorldScene;
 }
 
 declare global {
@@ -65,6 +67,7 @@ function main(): void {
   if (previous !== undefined) {
     previous.engine.stop();
     previous.inputManager.dispose();
+    previous.worldScene.dispose();
     previous.renderPipeline.dispose();
     window.__ASTRA__ = undefined;
   }
@@ -88,6 +91,9 @@ function main(): void {
 
   const engine = new Engine({ eventBus, timeController });
 
+  // The world: ground plane, sky dome, light rig and depth fog.
+  const worldScene = new WorldScene({ scene: renderPipeline.scene });
+
   // --- Wiring --------------------------------------------------------------
 
   // A paused scene freezes game time; leaving it restores the previous speed.
@@ -104,7 +110,14 @@ function main(): void {
   engine.onFrameStart(() => inputManager.update());
 
   // Draw exactly once per animation frame.
-  engine.onRender(() => renderPipeline.render());
+  //
+  // The world is advanced with the *scaled* delta from the TimeController, so
+  // the sky slows and freezes with everything else during time dilation while
+  // rendering itself keeps running at full frame rate.
+  engine.onRender(() => {
+    worldScene.update(timeController.getDelta());
+    renderPipeline.render();
+  });
 
   // --- Temporary developer bindings ---------------------------------------
   // Step 1.6 replaces these with the real debug overlay. Until then they are
@@ -128,6 +141,7 @@ function main(): void {
     sceneManager,
     inputManager,
     renderPipeline,
+    worldScene,
   };
 
   // --- Boot ----------------------------------------------------------------
@@ -146,7 +160,8 @@ function main(): void {
 
   console.info(
     `[ASTRA] booted - scene=${sceneManager.current} speed=${timeController.gameSpeed} ` +
-      `canvas=${renderPipeline.size.width}x${renderPipeline.size.height}`,
+      `canvas=${renderPipeline.size.width}x${renderPipeline.size.height} ` +
+      `ground=${worldScene.terrain.sizeMetres}m fog=${DEFAULT_FOG_NEAR}-${DEFAULT_FOG_FAR}m`,
   );
 }
 

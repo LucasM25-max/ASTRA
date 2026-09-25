@@ -36,7 +36,15 @@ export interface RenderPipelineOptions {
   far?: number;
   /** Upper bound on devicePixelRatio. Defaults to 2. */
   maxPixelRatio?: number;
+  /** Initial camera position. Defaults to a low three-quarter view of the plane. */
+  cameraPosition?: { readonly x: number; readonly y: number; readonly z: number };
+  /** Point the camera looks at. Defaults to just ahead of the plane's centre. */
+  cameraTarget?: { readonly x: number; readonly y: number; readonly z: number };
 }
+
+/** Framing that shows the ground plane receding into the fog. */
+export const DEFAULT_CAMERA_POSITION = { x: 0, y: 2.2, z: 8 } as const;
+export const DEFAULT_CAMERA_TARGET = { x: 0, y: 0.8, z: 0 } as const;
 
 export class RenderPipeline {
   readonly renderer: WebGLRenderer;
@@ -75,9 +83,12 @@ export class RenderPipeline {
       options.near ?? 0.1,
       options.far ?? 2000,
     );
-    // Placeholder framing; the third-person camera takes over in a later step.
-    this.camera.position.set(0, 1.6, 6);
-    this.camera.lookAt(0, 1, 0);
+    // Placeholder framing so the basic scene reads correctly on the first
+    // frame; the third-person camera takes over in Step 1.5.
+    const position = options.cameraPosition ?? DEFAULT_CAMERA_POSITION;
+    const target = options.cameraTarget ?? DEFAULT_CAMERA_TARGET;
+    this.camera.position.set(position.x, position.y, position.z);
+    this.camera.lookAt(target.x, target.y, target.z);
 
     this.attachResizeHandlers(canvas);
 

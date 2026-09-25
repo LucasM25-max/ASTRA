@@ -49,6 +49,13 @@ export const DEFAULT_TRANSITION_DURATION = 0.5;
 /** Tolerance used when matching a speed back to a named state. */
 const SPEED_EPSILON = 1e-4;
 
+/**
+ * Below this, a transition counts as finished. Without it, summing deltas such
+ * as 0.1 + 0.1 + 0.05 can leave ~1e-17 seconds on the clock, and `isTransitioning`
+ * would then report true forever even though `gameSpeed` is already exact.
+ */
+const TRANSITION_EPSILON = 1e-9;
+
 export interface TimeControllerOptions {
   /** Bus used to publish speed/state changes. */
   eventBus?: EventBus;
@@ -192,6 +199,9 @@ export class TimeController {
 
     if (this._transitionRemaining > 0) {
       this._transitionRemaining = Math.max(0, this._transitionRemaining - dt);
+      if (this._transitionRemaining < TRANSITION_EPSILON) {
+        this._transitionRemaining = 0;
+      }
       const duration = this._transitionLength;
       const t = duration > 0 ? 1 - this._transitionRemaining / duration : 1;
       this._gameSpeed = t >= 1 ? this._targetSpeed : lerp(this._transitionFrom, this._targetSpeed, t);

@@ -8,7 +8,7 @@
  * covered separately in render-pipeline-webgl.test.ts.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { PerspectiveCamera, Scene } from 'three';
+import { PerspectiveCamera, Scene, Vector3 } from 'three';
 import { EventBus } from '../src/core/EventBus';
 
 // `vi.mock` factories are hoisted, so both the stub and the recorder it writes
@@ -108,6 +108,34 @@ describe('RenderPipeline', () => {
     expect(renderer.canvas).toBe(canvas);
     expect(renderer.clearColorHex).toBe(0x112233);
     expect(renderer.clearAlpha).toBe(1);
+  });
+
+  it('frames the camera so the ground plane reads on the first frame', () => {
+    const pipeline = new RenderPipeline(canvas, { eventBus: bus });
+
+    // Elevated and pulled back, looking slightly down at the plane's centre.
+    expect(pipeline.camera.position.toArray()).toEqual([0, 2.2, 8]);
+    expect(pipeline.camera.position.y).toBeGreaterThan(0);
+
+    // The camera must actually be looking downwards, or the ground plane would
+    // not be visible at all.
+    const forward = pipeline.camera.getWorldDirection(new Vector3());
+    expect(forward.y).toBeLessThan(0);
+  });
+
+  it('accepts custom camera framing', () => {
+    const pipeline = new RenderPipeline(canvas, {
+      eventBus: bus,
+      cameraPosition: { x: 1, y: 2, z: 3 },
+      cameraTarget: { x: 4, y: 5, z: 6 },
+    });
+
+    expect(pipeline.camera.position.toArray()).toEqual([1, 2, 3]);
+    // lookAt() aims -Z at the target, so the camera now faces +X/+Y/+Z-ish.
+    const forward = pipeline.camera.getWorldDirection(new Vector3());
+    expect(forward.x).toBeGreaterThan(0);
+    expect(forward.y).toBeGreaterThan(0);
+    expect(forward.z).toBeGreaterThan(0);
   });
 
   it('sizes the drawing buffer from the canvas CSS size', () => {
