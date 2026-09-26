@@ -34,6 +34,17 @@ The full build plan lives in [`plan.md`](./plan.md).
   contact solver has nothing to correct. Time dilation needs nothing here — the
   engine issues a quarter of the fixed steps when dilated, and the player slows
   with the world.
+- **Step 1.5 — Third-Person Camera** (complete): an orbit camera that follows
+  the player at a 4m default distance within a 2m-10m range, aiming 1.5m above
+  the capsule's centre. Hold the right mouse button to orbit and scroll to
+  zoom; both are exponentially smoothed so they feel the same at any frame
+  rate, and the pitch is clamped so the camera cannot flip over the top or dive
+  under the floor. A raycast from the focus point pulls the camera in when
+  something comes between it and the player, and a second downward ray keeps it
+  off the ground. The camera ticks on `Engine.onRender` with the frame's
+  *real* delta rather than the scaled game delta, which is what makes it stay
+  fully responsive during time dilation — the player can look around freely
+  while an Active Encounter plays out at quarter speed.
 
 ---
 
@@ -192,7 +203,7 @@ __ASTRA__.physics.stepCount            // fixed steps taken so far
 - **Boot is async.** Rapier's WASM must be initialised before a `World` can
   exist, so `main.ts` exports a `ready` promise that tests await. `index.html`
   needs no change — the module auto-starts.
-- 238 tests across 17 files, including a jsdom integration test that runs the
+- 282 tests across 18 files, including a jsdom integration test that runs the
   real `main.ts` bootstrap end to end.
 
 ---

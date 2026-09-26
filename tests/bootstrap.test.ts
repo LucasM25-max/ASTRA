@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import { Box3, Frustum, Matrix4, Vector3 } from 'three';
 import { SceneState } from '../src/core/SceneManager';
+import { TimeState } from '../src/core/TimeController';
 
 vi.mock('../src/renderer/RenderPipeline', async (importOriginal) => {
   // A real Scene, because WorldScene populates it for real.
@@ -279,6 +280,96 @@ describe('bootstrap physics (Step 1.3)', () => {
     expect(handle.physics.stepCount).toBeGreaterThan(steps);
     expect(handle.worldScene.player.position.y).toBeLessThan(1);
     expect(handle.worldScene.player.position.y).toBeGreaterThan(0.85);
+  });
+});
+
+describe('bootstrap camera (Step 1.5)', () => {
+  it('exposes a camera controller driving the pipeline camera', async () => {
+    await bootApp();
+    for (let i = 0; i < 12; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    expect(handle.cameraController.camera).toBe(handle.renderPipeline.camera);
+    expect(handle.cameraController.player).toBe(handle.worldScene.player);
+    expect(handle.cameraController.distance).toBe(4);
+  });
+
+  it('puts the camera behind and above the player', async () => {
+    await bootApp();
+    for (let i = 0; i < 30; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    const player = handle.worldScene.player.position;
+    const camera = handle.renderPipeline.camera.position;
+
+    // Default yaw 0 puts the camera at +Z, behind a player whose forward is -Z.
+    expect(camera.z).toBeGreaterThan(player.z);
+    expect(Math.abs(camera.x - player.x)).toBeLessThan(0.5);
+    // Aimed at the player's centre plus the 1.5m height offset, so the camera
+    // sits above that point too.
+    expect(camera.y).toBeGreaterThan(player.y + 1.5);
+  });
+
+  it('orbits the camera with the mouse while the loop runs', async () => {
+    await bootApp();
+    for (let i = 0; i < 30; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    window.dispatchEvent(
+      new MouseEvent('mousedown', { button: 2, buttons: 2 }),
+    );
+    for (let i = 0; i < 20; i += 1) {
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: i * 20, clientY: 0 }));
+      await nextFrame();
+    }
+    window.dispatchEvent(new MouseEvent('mouseup', { button: 2, buttons: 0 }));
+
+    expect(Math.abs(handle.cameraController.yaw)).toBeGreaterThan(0.5);
+  });
+
+  it('zooms the camera with the wheel, clamped to 2m-10m', async () => {
+    await bootApp();
+    for (let i = 0; i < 12; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    for (let i = 0; i < 40; i += 1) {
+      window.dispatchEvent(new WheelEvent('wheel', { deltaY: -120 }));
+      await nextFrame();
+    }
+    expect(handle.cameraController.distance).toBeCloseTo(2, 5);
+
+    for (let i = 0; i < 80; i += 1) {
+      window.dispatchEvent(new WheelEvent('wheel', { deltaY: 120 }));
+      await nextFrame();
+    }
+    expect(handle.cameraController.distance).toBeCloseTo(10, 5);
+  });
+
+  it('keeps orbiting while game time is dilated', async () => {
+    await bootApp();
+    for (let i = 0; i < 12; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    handle.timeController.setState(TimeState.DILATED, 0);
+    window.dispatchEvent(new MouseEvent('mousedown', { button: 2, buttons: 2 }));
+    for (let i = 0; i < 20; i += 1) {
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: i * 20, clientY: 0 }));
+      await nextFrame();
+    }
+    window.dispatchEvent(new MouseEvent('mouseup', { button: 2, buttons: 0 }));
+
+    // The camera's clock is the wall clock, so dilation does not slow it.
+    expect(Math.abs(handle.cameraController.yaw)).toBeGreaterThan(0.5);
   });
 });
 

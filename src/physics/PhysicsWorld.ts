@@ -108,9 +108,9 @@ export interface CapsuleBody {
   readonly collider: RAPIER.Collider;
 }
 
-/** What a downward ground probe found. */
+/** What a ray probe found. */
 export interface GroundHit {
-  /** Unit surface normal at the hit point. */
+  /** Unit surface normal at the hit point, oriented to face the ray's origin. */
   readonly normal: Vec3;
   /** Distance from the ray's origin to the hit, in metres. */
   readonly distance: number;
@@ -141,8 +141,10 @@ export class PhysicsWorld {
   readonly world: RAPIER.World;
 
   private readonly initialTimestep: number;
-  /** Reused by `castDown`; Rapier reads its origin/dir at cast time. */
+  /** Reused by `castDown`; Rapier reads its origin/dir live at cast time. */
   private readonly downRay: RAPIER.Ray;
+  /** Reused by `castRay`; a separate instance so the two cannot interfere. */
+  private readonly probeRay: RAPIER.Ray;
   private steps = 0;
   private freed = false;
 
@@ -151,6 +153,7 @@ export class PhysicsWorld {
     this.world = new RAPIER.World({ x: gravity.x, y: gravity.y, z: gravity.z });
     this.world.timestep = this.initialTimestep;
     this.downRay = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
+    this.probeRay = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 });
   }
 
   /**
@@ -192,6 +195,64 @@ export class PhysicsWorld {
 
     const hit = this.world.castRayAndGetNormal(
       this.downRay,
+      reach,
+      true,
+      undefined,
+      undefined,
+      undefined,
+      exclude,
+    );
+    if (hit === null) return null;
+
+    return {
+      normal: { x: hit.normal.x, y: hit.normal.y, z: hit.normal.z },
+      distance: hit.timeOfImpact,
+    };
+  }
+
+  /**
+   * Cast a ray in an arbitrary direction and report the first surface hit.
+   *
+   * `direction` need not be normalised - it is normalised here, because
+   * `timeOfImpact` is only a distance when the ray's direction is a unit vector,
+   * and a caller passing a raw offset is an easy mistake to make.
+   *
+   * `exclude` should be the caller's own body where relevant. The camera's
+   * occlusion check passes the player, or the ray would start inside the
+   * player's own capsule and report a hit at distance zero.
+   *
+   * Returns null for a zero-length direction rather than a NaN distance.
+   *
+   * One sharp edge worth knowing: Rapier rebuilds its broad phase during
+   * `step()`, so a collider created *after* the last step is invisible to
+   * raycasts until the world is stepped again. In the game this never bites -
+   * colliders are built during world construction, and physics steps every
+   * frame - but a system that spawns a collider and immediately queries it will
+   * get a null it does not expect.
+   */
+  castRay(
+    origin: Vec3,
+    direction: Vec3,
+    maxDistance: number,
+    exclude?: RAPIER.RigidBody,
+  ): GroundHit | null {
+    if (this.freed) return null;
+    const reach = Number.isFinite(maxDistance) && maxDistance > 0 ? maxDistance : 0;
+    if (reach === 0) return null;
+
+    const length = Math.hypot(direction.x, direction.y, direction.z);
+    if (!(length > 1e-12)) return null;
+    const scale = 1 / length;
+
+    this.probeRay.origin.x = origin.x;
+    this.probeRay.origin.y = origin.y;
+    this.probeRay.origin.z = origin.z;
+    this.probeRay.dir.x = direction.x * scale;
+    this.probeRay.dir.y = direction.y * scale;
+    this.probeRay.dir.z = direction.z * scale;
+
+    const hit = this.world.castRayAndGetNormal(
+      this.probeRay,
       reach,
       true,
       undefined,

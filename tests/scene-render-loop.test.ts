@@ -7,6 +7,7 @@ import { TimeController, TimeState } from '../src/core/TimeController';
 import { InputManager } from '../src/core/InputManager';
 import { PhysicsWorld } from '../src/physics/PhysicsWorld';
 import { MovementController, WALK_SPEED } from '../src/player/MovementController';
+import { CameraController, DEFAULT_CAMERA_DISTANCE, ORBIT_MOUSE_BUTTON } from '../src/renderer/CameraController';
 import { PLAYER_HEIGHT } from '../src/player/Player';
 import { WorldScene } from '../src/world/WorldScene';
 
@@ -38,6 +39,12 @@ interface Rig {
   world: WorldScene;
   physics: PhysicsWorld;
   movement: MovementController;
+  cameraController: CameraController;
+  /** Drags the mouse by a relative amount, as an orbit drag does. */
+  drag: (dx: number, dy: number) => void;
+  scroll: (deltaY: number) => void;
+  /** Holds the orbit button down. */
+  pressOrbit: () => void;
   /** Holds a key down across frames, the way a held key behaves. */
   hold: (code: string) => void;
   release: (code: string) => void;
@@ -75,7 +82,11 @@ async function createRig(): Promise<Rig> {
     physics,
   });
 
+  const cameraController = new CameraController({ camera, input, physics, player: world.player });
+
   let renderCount = 0;
+  let mouseX = 0;
+  let mouseY = 0;
 
   // Poll input once per frame, before anything reads it.
   engine.onFrameStart(() => input.update());
@@ -87,8 +98,11 @@ async function createRig(): Promise<Rig> {
     world.fixedUpdate(delta);
   });
 
-  // Presentation: scaled delta, exactly once per frame.
-  engine.onRender(() => {
+  // Presentation: scaled delta for the world, *real* delta for the camera. The
+  // difference is the Step 1.5 requirement, not an inconsistency - see the
+  // wiring note in main.ts.
+  engine.onRender((frame) => {
+    cameraController.update(frame.realDelta);
     world.update(timeController.getDelta());
     renderCount += 1;
   });
@@ -105,14 +119,34 @@ async function createRig(): Promise<Rig> {
     inputTarget.dispatchEvent(new KeyboardEvent('keyup', { code, key: code }));
   };
 
+  // Mouse coordinates are absolute in the DOM, so a drag is expressed as a
+  // relative delta here and accumulated.
+  const drag = (dx: number, dy: number): void => {
+    mouseX += dx;
+    mouseY += dy;
+    inputTarget.dispatchEvent(new MouseEvent('mousemove', { clientX: mouseX, clientY: mouseY }));
+  };
+  const scroll = (deltaY: number): void => {
+    inputTarget.dispatchEvent(new WheelEvent('wheel', { deltaY }));
+  };
+  const pressOrbit = (): void => {
+    inputTarget.dispatchEvent(
+      new MouseEvent('mousedown', { button: ORBIT_MOUSE_BUTTON, buttons: 2 }),
+    );
+  };
+
   return {
     engine,
     timeController,
     world,
     physics,
     movement,
+    cameraController,
+    drag,
+    scroll,
     hold,
     release,
+    pressOrbit,
     renders: () => renderCount,
     step,
     dispose: () => {
@@ -464,5 +498,141 @@ describe('render loop -> MovementController -> player', () => {
     expect(rig.world.player.position.z).toBe(position.z);
     expect(rig.renders()).toBeGreaterThan(180);
     rig.release('KeyW');
+  });
+});
+
+/**
+ * Step 1.5's most important requirement, and the easiest one to get backwards:
+ * the camera must keep responding at full rate while game time is dilated,
+ * because the player needs to look around freely during an Active Encounter.
+ *
+ * The mechanism is that the camera is driven from `onRender` with the frame's
+ * *real* delta while everything else takes the scaled one. These tests pin the
+ * wiring in main.ts, not the camera itself - `tests/camera-controller.test.ts`
+ * covers the camera's own behaviour.
+ */
+describe('render loop -> CameraController -> camera', () => {
+  it('orbits the camera while the loop runs', async () => {
+    rig = await createRig();
+    rig.engine.start();
+    rig.step(16);
+
+    rig.pressOrbit();
+    for (let i = 0; i < 10; i += 1) {
+      rig.drag(20, 5);
+      rig.step(16);
+    }
+
+    expect(rig.cameraController.yaw).not.toBe(0);
+    expect(rig.cameraController.pitch).toBeGreaterThan(0);
+    rig.dispose();
+  });
+
+  it('keeps the camera at the configured distance while following the player', async () => {
+    rig = await createRig();
+    rig.engine.start();
+    rig.step(16);
+    for (let i = 0; i < 60; i += 1) rig.step(16);
+
+    expect(rig.cameraController.appliedDistance).toBeCloseTo(DEFAULT_CAMERA_DISTANCE, 2);
+    // And it is aimed at the player's chest plus the height offset.
+    expect(rig.cameraController.focusPoint.y).toBeCloseTo(
+      rig.world.player.position.y + 1.5,
+      1,
+    );
+    rig.dispose();
+  });
+
+  it('orbits at full speed while game time is dilated', async () => {
+    const full = await createRig();
+    full.engine.start();
+    full.step(16);
+    full.pressOrbit();
+    for (let i = 0; i < 30; i += 1) {
+      full.drag(20, 0);
+      full.step(16);
+    }
+    const fullYaw = full.cameraController.yaw;
+    full.dispose();
+
+    const dilated = await createRig();
+    dilated.engine.start();
+    dilated.step(16);
+    dilated.timeController.setState(TimeState.DILATED, 0);
+    dilated.pressOrbit();
+    for (let i = 0; i < 30; i += 1) {
+      dilated.drag(20, 0);
+      dilated.step(16);
+    }
+    const dilatedYaw = dilated.cameraController.yaw;
+    dilated.dispose();
+
+    // The same wall-clock time and the same mouse movement must produce the
+    // same orbit, dilated or not. If the camera were taking the scaled delta
+    // this would be a quarter of the angle.
+    expect(Math.abs(dilatedYaw - fullYaw)).toBeLessThan(0.05);
+    expect(Math.abs(fullYaw)).toBeGreaterThan(0.5);
+  });
+
+  it('zooms at full speed while game time is dilated', async () => {
+    const full = await createRig();
+    full.engine.start();
+    full.step(16);
+    for (let i = 0; i < 20; i += 1) {
+      full.scroll(-120);
+      full.step(16);
+    }
+    const fullDistance = full.cameraController.distance;
+    full.dispose();
+
+    const dilated = await createRig();
+    dilated.engine.start();
+    dilated.step(16);
+    dilated.timeController.setState(TimeState.DILATED, 0);
+    for (let i = 0; i < 20; i += 1) {
+      dilated.scroll(-120);
+      dilated.step(16);
+    }
+    const dilatedDistance = dilated.cameraController.distance;
+    dilated.dispose();
+
+    expect(dilatedDistance).toBeCloseTo(fullDistance, 3);
+    expect(fullDistance).toBeLessThan(DEFAULT_CAMERA_DISTANCE);
+  });
+
+  it('still follows the player while game time is dilated', async () => {
+    rig = await createRig();
+    rig.engine.start();
+    rig.step(16);
+    for (let i = 0; i < 60; i += 1) rig.step(16);
+
+    rig.timeController.setState(TimeState.DILATED, 0);
+    rig.hold('KeyW');
+    for (let i = 0; i < 240; i += 1) rig.step(16);
+
+    // The player has moved - a quarter as far as it would have - and the camera
+    // has kept up with it, because the camera's clock never dilated.
+    const focus = rig.cameraController.focusPoint;
+    expect(rig.world.player.position.z).toBeLessThan(-1);
+    expect(focus.z).toBeCloseTo(rig.world.player.position.z, 0);
+    rig.release('KeyW');
+  });
+
+  it('keeps the camera responsive while game time is paused', async () => {
+    rig = await createRig();
+    rig.engine.start();
+    rig.step(16);
+    for (let i = 0; i < 60; i += 1) rig.step(16);
+
+    rig.timeController.setState(TimeState.PAUSED, 0);
+    rig.pressOrbit();
+    for (let i = 0; i < 20; i += 1) {
+      rig.drag(20, 0);
+      rig.step(16);
+    }
+
+    // Nothing in the world moves, but the camera still orbits.
+    expect(rig.cameraController.yaw).not.toBe(0);
+    rig.dispose();
   });
 });

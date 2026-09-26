@@ -32,6 +32,7 @@ import { EventBus, eventBus } from './core/EventBus';
 import { InputManager } from './core/InputManager';
 import { SceneManager, SceneState } from './core/SceneManager';
 import { TimeController, TimeState } from './core/TimeController';
+import { CameraController } from './renderer/CameraController';
 import { RenderPipeline } from './renderer/RenderPipeline';
 import { PhysicsWorld } from './physics/PhysicsWorld';
 import { MovementController } from './player/MovementController';
@@ -49,6 +50,7 @@ export interface AstraDebugHandle {
   readonly physics: PhysicsWorld;
   readonly worldScene: WorldScene;
   readonly movement: MovementController;
+  readonly cameraController: CameraController;
 }
 
 declare global {
@@ -139,6 +141,15 @@ async function boot(): Promise<void> {
       physics,
     });
 
+    // The third-person camera. It owns no Three objects of its own - it drives
+    // the pipeline's camera - so it is created after both and wired below.
+    const cameraController = new CameraController({
+      camera: renderPipeline.camera,
+      input: inputManager,
+      physics,
+      player: worldScene.player,
+    });
+
     // --- Wiring ------------------------------------------------------------
 
     // A paused scene freezes game time; leaving it restores the previous speed.
@@ -175,7 +186,15 @@ async function boot(): Promise<void> {
     // the sky slows and freezes with everything else during time dilation while
     // rendering itself keeps running at full frame rate. `worldScene.update()`
     // also reconciles the player's mesh with its physics body.
-    engine.onRender(() => {
+    //
+    // The camera is advanced with the *real* delta instead, and that difference
+    // is the Step 1.5 requirement, not an inconsistency: the camera has to stay
+    // responsive while the world is slowed, because the player needs to look
+    // around freely during an Active Encounter. Passing `frame.realDelta` here
+    // is what buys that - `gameDelta` would dilate the orbit along with
+    // everything else.
+    engine.onRender((frame) => {
+      cameraController.update(frame.realDelta);
       worldScene.update(timeController.getDelta());
       renderPipeline.render();
     });
@@ -205,6 +224,7 @@ async function boot(): Promise<void> {
       physics,
       worldScene,
       movement,
+      cameraController,
     };
 
     // --- Boot --------------------------------------------------------------
