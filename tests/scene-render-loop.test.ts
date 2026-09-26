@@ -3,10 +3,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PerspectiveCamera, Scene } from 'three';
 import { Engine } from '../src/core/Engine';
+import { EventBus } from '../src/core/EventBus';
 import { TimeController, TimeState } from '../src/core/TimeController';
 import { InputManager } from '../src/core/InputManager';
 import { PhysicsWorld } from '../src/physics/PhysicsWorld';
 import { MovementController, WALK_SPEED } from '../src/player/MovementController';
+import {
+  DEFAULT_AXES_KEY,
+  DEFAULT_GRID_KEY,
+  DEFAULT_TOGGLE_KEY,
+  DebugOverlay,
+} from '../src/debug/DebugOverlay';
 import { CameraController, DEFAULT_CAMERA_DISTANCE, ORBIT_MOUSE_BUTTON } from '../src/renderer/CameraController';
 import { PLAYER_HEIGHT } from '../src/player/Player';
 import { WorldScene } from '../src/world/WorldScene';
@@ -40,6 +47,7 @@ interface Rig {
   physics: PhysicsWorld;
   movement: MovementController;
   cameraController: CameraController;
+  debugOverlay: DebugOverlay;
   /** Drags the mouse by a relative amount, as an orbit drag does. */
   drag: (dx: number, dy: number) => void;
   scroll: (deltaY: number) => void;
@@ -48,6 +56,8 @@ interface Rig {
   /** Holds a key down across frames, the way a held key behaves. */
   hold: (code: string) => void;
   release: (code: string) => void;
+  /** Presses and releases a key, which is what edge-triggered bindings see. */
+  tap: (code: string) => void;
   /** Counts render passes, standing in for RenderPipeline.render(). */
   renders: () => number;
   /** Runs one engine frame `ms` of wall-clock time later. */
@@ -63,11 +73,17 @@ interface Rig {
 async function createRig(): Promise<Rig> {
   const timeController = new TimeController();
   const engine = new Engine({ timeController });
+  // A private bus rather than the module singleton, so one test's input events
+  // cannot leak into another's.
+  const bus = new EventBus();
   const physics = await PhysicsWorld.create({ timestep: engine.fixedTimeStep });
-  const world = new WorldScene({ scene: new Scene(), physics });
+  // Held separately so the debug overlay's gizmos can be added to the same
+  // graph the world populates - WorldScene keeps its scene private.
+  const scene = new Scene();
+  const world = new WorldScene({ scene, physics });
 
   const inputTarget = new EventTarget();
-  const input = new InputManager({ target: inputTarget, canvas: null });
+  const input = new InputManager({ target: inputTarget, canvas: null, eventBus: bus });
   input.attach();
 
   const camera = new PerspectiveCamera(60, 1.6, 0.1, 2000);
@@ -83,6 +99,14 @@ async function createRig(): Promise<Rig> {
   });
 
   const cameraController = new CameraController({ camera, input, physics, player: world.player });
+
+  const debugOverlay = new DebugOverlay({
+    scene,
+    input,
+    timeController,
+    eventBus: bus,
+    parent: document.body,
+  });
 
   let renderCount = 0;
   let mouseX = 0;
@@ -105,6 +129,9 @@ async function createRig(): Promise<Rig> {
     cameraController.update(frame.realDelta);
     world.update(timeController.getDelta());
     renderCount += 1;
+    // After everything else, exactly as main.ts wires it: the overlay reads the
+    // frame and the TimeController, and touches neither physics nor the world.
+    debugOverlay.update(frame);
   });
 
   const step = (ms: number): void => {
@@ -116,6 +143,14 @@ async function createRig(): Promise<Rig> {
     inputTarget.dispatchEvent(new KeyboardEvent('keydown', { code, key: code }));
   };
   const release = (code: string): void => {
+    inputTarget.dispatchEvent(new KeyboardEvent('keyup', { code, key: code }));
+  };
+
+  // A key held down emits auto-repeats, which the InputManager reports as
+  // `repeat` rather than as a fresh press - so anything edge-triggered, like
+  // the debug overlay's bindings, only ever sees a tap.
+  const tap = (code: string): void => {
+    inputTarget.dispatchEvent(new KeyboardEvent('keydown', { code, key: code }));
     inputTarget.dispatchEvent(new KeyboardEvent('keyup', { code, key: code }));
   };
 
@@ -142,19 +177,32 @@ async function createRig(): Promise<Rig> {
     physics,
     movement,
     cameraController,
+    debugOverlay,
     drag,
     scroll,
     hold,
     release,
+    tap,
     pressOrbit,
     renders: () => renderCount,
     step,
     dispose: () => {
+      debugOverlay.dispose();
       input.dispose();
       world.dispose();
       physics.dispose();
     },
   };
+}
+
+/** Read a row's displayed text out of a debug HUD. */
+function rowText(hud: { element: HTMLElement }, label: string): string {
+  for (const row of Array.from(hud.element.querySelectorAll<HTMLElement>('.astra-debug__row'))) {
+    if (row.querySelector<HTMLElement>('.astra-debug__k')?.textContent === label) {
+      return row.querySelector<HTMLElement>('.astra-debug__v')?.textContent ?? '';
+    }
+  }
+  throw new Error(`no HUD row labelled "${label}"`);
 }
 
 let rig: Rig | undefined;
@@ -633,6 +681,175 @@ describe('render loop -> CameraController -> camera', () => {
 
     // Nothing in the world moves, but the camera still orbits.
     expect(rig.cameraController.yaw).not.toBe(0);
+    rig.dispose();
+  });
+});
+
+/**
+ * Step 1.6's overlay, wired the way main.ts wires it.
+ *
+ * What is worth proving here is not that the panel draws - no GL context - but
+ * that the overlay is driven by the render loop and therefore keeps working
+ * while game time is dilated or paused, exactly like the camera. It also pins
+ * the ordering: the overlay's `update()` runs after `renderPipeline.render()`
+ * in main.ts, and it must never touch physics or the world.
+ */
+describe('render loop -> DebugOverlay', () => {
+  it('puts the gizmos in the scene without showing them', async () => {
+    rig = await createRig();
+    rig.engine.start();
+    rig.step(16);
+
+    // Present in the graph from the first frame, so showing the overlay never
+    // has to touch the scene tree - and invisible, so it costs nothing.
+    expect(rig.debugOverlay.gizmos.grid.parent).not.toBeNull();
+    expect(rig.debugOverlay.gizmos.isGridVisible).toBe(false);
+    expect(rig.debugOverlay.gizmos.isAxesVisible).toBe(false);
+    rig.dispose();
+  });
+
+  it('toggles the overlay on F3 through the real loop', async () => {
+    rig = await createRig();
+    rig.engine.start();
+    rig.step(16);
+    for (let i = 0; i < 10; i += 1) rig.step(16);
+
+    expect(rig.debugOverlay.isVisible).toBe(false);
+
+    rig.tap(DEFAULT_TOGGLE_KEY);
+    rig.step(16);
+
+    expect(rig.debugOverlay.isVisible).toBe(true);
+    expect(rig.debugOverlay.hud.element.hidden).toBe(false);
+    expect(rig.debugOverlay.gizmos.isGridVisible).toBe(true);
+    expect(rig.debugOverlay.gizmos.isAxesVisible).toBe(true);
+
+    rig.tap(DEFAULT_TOGGLE_KEY);
+    rig.step(16);
+
+    expect(rig.debugOverlay.isVisible).toBe(false);
+    expect(rig.debugOverlay.gizmos.isGridVisible).toBe(false);
+    rig.dispose();
+  });
+
+  it('shows the TimeController state in the panel', async () => {
+    rig = await createRig();
+    rig.engine.start();
+    rig.step(16);
+    for (let i = 0; i < 10; i += 1) rig.step(16);
+
+    rig.tap(DEFAULT_TOGGLE_KEY);
+    rig.step(16);
+    // Two frames: the first reveals the panel, the second gets past the
+    // throttle and actually writes.
+    rig.step(100);
+    rig.step(100);
+
+    expect(rowText(rig.debugOverlay.hud, 'time')).toBe('REALTIME');
+    expect(rowText(rig.debugOverlay.hud, 'target')).toBe('100%');
+
+    rig.tap('Digit2');
+    rig.step(100);
+
+    expect(rowText(rig.debugOverlay.hud, 'time')).toBe('DILATED');
+    expect(rowText(rig.debugOverlay.hud, 'target')).toBe('25%');
+    rig.dispose();
+  });
+
+  it('keeps reporting frames while the world is dilated and paused', async () => {
+    rig = await createRig();
+    rig.engine.start();
+    rig.step(16);
+    for (let i = 0; i < 10; i += 1) rig.step(16);
+
+    rig.tap(DEFAULT_TOGGLE_KEY);
+    for (let i = 0; i < 20; i += 1) rig.step(16);
+    const full = Number(rowText(rig.debugOverlay.hud, 'frame'));
+
+    rig.timeController.setState(TimeState.DILATED, 0);
+    for (let i = 0; i < 20; i += 1) rig.step(16);
+    const dilated = Number(rowText(rig.debugOverlay.hud, 'frame'));
+    expect(dilated).toBeGreaterThan(full);
+    expect(rowText(rig.debugOverlay.hud, 'time')).toBe('DILATED');
+
+    rig.timeController.setState(TimeState.PAUSED, 0);
+    for (let i = 0; i < 20; i += 1) rig.step(16);
+    const paused = Number(rowText(rig.debugOverlay.hud, 'frame'));
+    expect(paused).toBeGreaterThan(dilated);
+    expect(rowText(rig.debugOverlay.hud, 'time')).toBe('PAUSED');
+
+    // The world, meanwhile, stopped issuing fixed steps entirely.
+    expect(rig.physics.stepCount).toBeGreaterThan(0);
+    rig.dispose();
+  });
+
+  it('toggles the grid and axes independently through the loop', async () => {
+    rig = await createRig();
+    rig.engine.start();
+    rig.step(16);
+    rig.tap(DEFAULT_TOGGLE_KEY);
+    rig.step(16);
+
+    rig.tap(DEFAULT_GRID_KEY);
+    rig.step(16);
+    expect(rig.debugOverlay.gizmos.isGridVisible).toBe(false);
+    expect(rig.debugOverlay.gizmos.isAxesVisible).toBe(true);
+
+    rig.tap(DEFAULT_AXES_KEY);
+    rig.step(16);
+    expect(rig.debugOverlay.gizmos.isAxesVisible).toBe(false);
+    rig.dispose();
+  });
+
+  it('never perturbs the simulation, however hard it is used', async () => {
+    // Baseline: the same frames with the overlay hidden.
+    const quiet = await createRig();
+    quiet.engine.start();
+    quiet.step(16);
+    for (let i = 0; i < 60; i += 1) quiet.step(16);
+    const baseSteps = quiet.physics.stepCount;
+    const basePosition = { ...quiet.world.player.position };
+    quiet.dispose();
+
+    // The same frames again, with the overlay visible and the gizmo keys
+    // hammered. Only F3/F4/F6 are pressed - the time bindings are deliberately
+    // left alone, because those are *supposed* to change the simulation.
+    const busy = await createRig();
+    busy.engine.start();
+    busy.step(16);
+    for (let i = 0; i < 60; i += 1) {
+      busy.tap(DEFAULT_TOGGLE_KEY);
+      busy.tap(DEFAULT_GRID_KEY);
+      busy.tap(DEFAULT_AXES_KEY);
+      busy.step(16);
+    }
+    const busySteps = busy.physics.stepCount;
+    const busyPosition = { ...busy.world.player.position };
+    busy.dispose();
+
+    // Identical fixed-step count and identical player placement: the overlay's
+    // own work is invisible to the simulation.
+    expect(busySteps).toBe(baseSteps);
+    expect(busyPosition.x).toBeCloseTo(basePosition.x, 6);
+    expect(busyPosition.y).toBeCloseTo(basePosition.y, 6);
+    expect(busyPosition.z).toBeCloseTo(basePosition.z, 6);
+  });
+
+  it('logs input events to the console when F7 is pressed', async () => {
+    rig = await createRig();
+    const spy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    rig.engine.start();
+    rig.step(16);
+
+    rig.tap('F7');
+    rig.step(16);
+    expect(rig.debugOverlay.isLoggingInput).toBe(true);
+
+    rig.tap('KeyW');
+    rig.step(16);
+    expect(spy).toHaveBeenCalledWith('[ASTRA:input] key down  KeyW');
+
+    spy.mockRestore();
     rig.dispose();
   });
 });

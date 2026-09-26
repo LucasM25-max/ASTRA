@@ -27,7 +27,7 @@ import { EventBus, type AstraEvents } from './EventBus';
  * or re-triggers a focused button, Tab moves focus, and the arrow keys scroll.
  * Game-specific bindings are added by later steps.
  */
-const DEFAULT_PREVENT_DEFAULT_KEYS: readonly string[] = [
+export const DEFAULT_PREVENT_DEFAULT_KEYS: readonly string[] = [
   'Space',
   'Tab',
   'ArrowUp',

@@ -88,6 +88,7 @@ afterEach(() => {
   const handle = window.__ASTRA__;
   if (handle !== undefined) {
     handle.engine.stop();
+    handle.debugOverlay.dispose();
     handle.inputManager.dispose();
     handle.worldScene.dispose();
     handle.physics.dispose();
@@ -370,6 +371,177 @@ describe('bootstrap camera (Step 1.5)', () => {
 
     // The camera's clock is the wall clock, so dilation does not slow it.
     expect(Math.abs(handle.cameraController.yaw)).toBeGreaterThan(0.5);
+  });
+});
+
+describe('bootstrap debug overlay (Step 1.6)', () => {
+  it('exposes a debug overlay wired to the scene and the TimeController', async () => {
+    await bootApp();
+    for (let i = 0; i < 12; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    const overlay = handle.debugOverlay;
+    expect(overlay.isDisposed).toBe(false);
+    expect(overlay.isVisible).toBe(false);
+    // The gizmos live in the renderer's scene graph from the first frame.
+    expect(overlay.gizmos.grid.parent).not.toBeNull();
+    expect(overlay.gizmos.grid.parent).toBe(handle.renderPipeline.scene);
+  });
+
+  it('starts with both gizmos in the scene but invisible', async () => {
+    await bootApp();
+    for (let i = 0; i < 12; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    // Present so showing the overlay never has to touch the scene tree, and
+    // invisible so a hidden overlay costs nothing.
+    expect(handle.renderPipeline.scene.children).toContain(handle.debugOverlay.gizmos.grid);
+    expect(handle.renderPipeline.scene.children).toContain(handle.debugOverlay.gizmos.axes);
+    expect(handle.debugOverlay.gizmos.isGridVisible).toBe(false);
+    expect(handle.debugOverlay.gizmos.isAxesVisible).toBe(false);
+  });
+
+  it('toggles the whole overlay on F3 through the real loop', async () => {
+    await bootApp();
+    for (let i = 0; i < 12; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'F3', key: 'F3' }));
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: 'F3', key: 'F3' }));
+    await nextFrame();
+
+    expect(handle.debugOverlay.isVisible).toBe(true);
+    expect(handle.debugOverlay.gizmos.isGridVisible).toBe(true);
+    expect(handle.debugOverlay.gizmos.isAxesVisible).toBe(true);
+    expect(document.querySelector('#astra-debug-hud')?.hasAttribute('hidden')).toBe(false);
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'F3', key: 'F3' }));
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: 'F3', key: 'F3' }));
+    await nextFrame();
+
+    expect(handle.debugOverlay.isVisible).toBe(false);
+    expect(handle.debugOverlay.gizmos.isGridVisible).toBe(false);
+  });
+
+  it('toggles the grid and axis gizmos independently', async () => {
+    await bootApp();
+    for (let i = 0; i < 12; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'F3', key: 'F3' }));
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: 'F3', key: 'F3' }));
+    await nextFrame();
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'F4', key: 'F4' }));
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: 'F4', key: 'F4' }));
+    await nextFrame();
+
+    expect(handle.debugOverlay.isGridEnabled).toBe(false);
+    expect(handle.debugOverlay.gizmos.isGridVisible).toBe(false);
+    expect(handle.debugOverlay.gizmos.isAxesVisible).toBe(true);
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'F6', key: 'F6' }));
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: 'F6', key: 'F6' }));
+    await nextFrame();
+
+    expect(handle.debugOverlay.gizmos.isAxesVisible).toBe(false);
+  });
+
+  it('shows the TimeController state and gameSpeed in the panel', async () => {
+    await bootApp();
+    for (let i = 0; i < 12; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'F3', key: 'F3' }));
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: 'F3', key: 'F3' }));
+    // Two frames: the first reveals the panel, the second gets past the
+    // throttle and actually writes.
+    await nextFrame();
+    await nextFrame();
+
+    const read = (label: string): string => {
+      const panel = document.querySelector('#astra-debug-hud');
+      for (const row of Array.from(panel?.querySelectorAll('.astra-debug__row') ?? [])) {
+        const key = row.querySelector('.astra-debug__k');
+        if (key?.textContent === label) {
+          return row.querySelector('.astra-debug__v')?.textContent ?? '';
+        }
+      }
+      throw new Error(`no HUD row labelled "${label}"`);
+    };
+
+    expect(read('time')).toBe('REALTIME');
+    expect(read('speed')).toBe('100%');
+
+    handle.timeController.setState(TimeState.DILATED, 0);
+    // The panel repaints at 20Hz, so it takes a few frames of wall-clock time
+    // for the change to reach the DOM.
+    for (let i = 0; i < 8; i += 1) await nextFrame();
+
+    expect(read('time')).toBe('DILATED');
+    expect(read('target')).toBe('25%');
+  });
+
+  it('logs input events to the console when F7 is pressed', async () => {
+    const spy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    await bootApp();
+    for (let i = 0; i < 12; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'F7', key: 'F7' }));
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: 'F7', key: 'F7' }));
+    await nextFrame();
+    expect(handle.debugOverlay.isLoggingInput).toBe(true);
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW', key: 'w' }));
+    await nextFrame();
+
+    expect(spy).toHaveBeenCalledWith('[ASTRA:input] key down  KeyW');
+    spy.mockRestore();
+  });
+
+  it('suppresses the browser default for the debug function keys', async () => {
+    await bootApp();
+    for (let i = 0; i < 6; i += 1) await nextFrame();
+
+    // F3 opens the find bar in Firefox and F6 moves focus. A debug key that
+    // also drives the browser is worse than no debug key.
+    for (const code of ['F3', 'F4', 'F6', 'F7']) {
+      const event = new KeyboardEvent('keydown', { code, key: code, cancelable: true });
+      window.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+    }
+  });
+
+  it('is torn down with the rest of the run', async () => {
+    await bootApp();
+    for (let i = 0; i < 12; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'F3', key: 'F3' }));
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: 'F3', key: 'F3' }));
+    await nextFrame();
+    expect(handle.debugOverlay.isVisible).toBe(true);
+
+    handle.debugOverlay.dispose();
+
+    expect(handle.debugOverlay.isDisposed).toBe(true);
+    expect(handle.debugOverlay.gizmos.grid.parent).toBeNull();
+    expect(document.querySelector('#astra-debug-hud')).toBeNull();
   });
 });
 

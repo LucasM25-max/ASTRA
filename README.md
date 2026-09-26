@@ -45,6 +45,17 @@ The full build plan lives in [`plan.md`](./plan.md).
   *real* delta rather than the scaled game delta, which is what makes it stay
   fully responsive during time dilation — the player can look around freely
   while an Active Encounter plays out at quarter speed.
+- **Step 1.6 — Debug & Polish** (complete): a developer overlay, hidden by
+  default and togglable with F3, that pins an FPS and frame-time readout to the
+  top-left, drops a 2m measurement grid onto the ground and an X/Y/Z tripod at
+  the origin, and shows the TimeController's state and gameSpeed. F4, F6 and F7
+  toggle the grid, the tripod and a console log of input events independently.
+  The 1/2/3 time-state bindings that were temporary developer bindings in
+  `main.ts` now live inside it, so every developer binding is in one place. The
+  overlay runs on the same render tick as the camera and never touches physics,
+  and it is built to a cost contract: invisible gizmos cost nothing, a hidden
+  panel writes no DOM at all, and a visible one repaints at 20Hz rather than
+  every frame.
 
 ---
 
@@ -167,16 +178,28 @@ __ASTRA__.timeController.setState('DILATED')      // the world slows to 25%
 __ASTRA__.engine.fps
 ```
 
-Temporary key bindings (replaced by the Step 1.6 debug overlay):
+Developer key bindings (the Step 1.6 debug overlay):
 
 | Key | Action |
 | --- | --- |
+| `F3` | Toggle the whole debug overlay: the panel plus both gizmos |
+| `F4` | Toggle the ground measurement grid |
+| `F6` | Toggle the X/Y/Z tripod at the origin |
+| `F7` | Toggle the console log of input events |
 | `1` / `2` / `3` | Time state: `REALTIME` / `DILATED` / `PAUSED` |
 | `P` | Toggle the `PAUSED` scene state (freezes game time via the event wiring) |
+
+The panel shows FPS, frame time, the frame counter, fixed steps issued, the
+`TimeController`'s state, its current and target speed, the current scene, and
+the renderer's draw-call, triangle, geometry and texture counts. Function keys
+were chosen over letters because the gameplay verbs are WASD, Shift and Space;
+`F5` is avoided because every browser binds it to reload.
 
 While time is dilated or paused, the sky's slow gradient drift slows and stops
 with it — and so does the player's fall — a visible confirmation that the world
 really is reading its delta from the `TimeController` and not from the engine.
+The FPS and frame counters keep running through it, which is the same
+real-time contract the camera has.
 
 ```js
 __ASTRA__.worldScene.player.position   // { x, y, z } of the capsule's centre
@@ -203,7 +226,7 @@ __ASTRA__.physics.stepCount            // fixed steps taken so far
 - **Boot is async.** Rapier's WASM must be initialised before a `World` can
   exist, so `main.ts` exports a `ready` promise that tests await. `index.html`
   needs no change — the module auto-starts.
-- 282 tests across 18 files, including a jsdom integration test that runs the
+- 348 tests across 19 files, including a jsdom integration test that runs the
   real `main.ts` bootstrap end to end.
 
 ---

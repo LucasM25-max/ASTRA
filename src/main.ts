@@ -29,9 +29,20 @@
 
 import { Engine } from './core/Engine';
 import { EventBus, eventBus } from './core/EventBus';
-import { InputManager } from './core/InputManager';
+import {
+  DEFAULT_PREVENT_DEFAULT_KEYS,
+  InputManager,
+  type InputManagerOptions,
+} from './core/InputManager';
 import { SceneManager, SceneState } from './core/SceneManager';
-import { TimeController, TimeState } from './core/TimeController';
+import { TimeController } from './core/TimeController';
+import {
+  DEFAULT_AXES_KEY,
+  DEFAULT_GRID_KEY,
+  DEFAULT_INPUT_LOG_KEY,
+  DEFAULT_TOGGLE_KEY,
+  DebugOverlay,
+} from './debug/DebugOverlay';
 import { CameraController } from './renderer/CameraController';
 import { RenderPipeline } from './renderer/RenderPipeline';
 import { PhysicsWorld } from './physics/PhysicsWorld';
@@ -51,6 +62,7 @@ export interface AstraDebugHandle {
   readonly worldScene: WorldScene;
   readonly movement: MovementController;
   readonly cameraController: CameraController;
+  readonly debugOverlay: DebugOverlay;
 }
 
 declare global {
@@ -74,6 +86,7 @@ function showBootError(message: string): void {
 /** Tear down a previous run. Shared by the HMR path and by tests. */
 function teardown(handle: AstraDebugHandle): void {
   handle.engine.stop();
+  handle.debugOverlay.dispose();
   handle.inputManager.dispose();
   handle.worldScene.dispose();
   handle.physics.dispose();
@@ -96,7 +109,23 @@ async function boot(): Promise<void> {
     }
 
     const timeController = new TimeController({ eventBus });
-    const inputManager = new InputManager({ canvas, eventBus });
+
+    // The debug overlay binds the function keys F3/F4/F6/F7. They are added to
+    // the prevent-default list so the browser does not act on them as well -
+    // F3 opens the find bar in Firefox and F6 moves focus - which would
+    // otherwise swallow the press before the game ever sees it.
+    const inputOptions: InputManagerOptions = {
+      canvas,
+      eventBus,
+      preventDefaultKeys: [
+        ...DEFAULT_PREVENT_DEFAULT_KEYS,
+        DEFAULT_TOGGLE_KEY,
+        DEFAULT_GRID_KEY,
+        DEFAULT_AXES_KEY,
+        DEFAULT_INPUT_LOG_KEY,
+      ],
+    };
+    const inputManager = new InputManager(inputOptions);
     const sceneManager = new SceneManager({
       eventBus,
       initialState: SceneState.LOADING,
@@ -150,6 +179,20 @@ async function boot(): Promise<void> {
       player: worldScene.player,
     });
 
+    // The developer overlay: FPS counter, grid and axis gizmos, a console log
+    // of input events, and the TimeController readout. It is hidden by default
+    // and costs nothing until F3 is pressed - see the cost contract in
+    // DebugOverlay. The 1/2/3 and P time bindings that used to live here now
+    // live inside it, so every developer binding is in one place.
+    const debugOverlay = new DebugOverlay({
+      scene: renderPipeline.scene,
+      input: inputManager,
+      timeController,
+      sceneManager,
+      renderer: renderPipeline.renderer,
+      eventBus,
+    });
+
     // --- Wiring ------------------------------------------------------------
 
     // A paused scene freezes game time; leaving it restores the previous speed.
@@ -197,21 +240,9 @@ async function boot(): Promise<void> {
       cameraController.update(frame.realDelta);
       worldScene.update(timeController.getDelta());
       renderPipeline.render();
-    });
-
-    // --- Temporary developer bindings -------------------------------------
-    // Step 1.6 replaces these with the real debug overlay. Until then they are
-    // the quickest way to feel the time-dilation system working in the browser.
-    engine.onRender(() => {
-      if (inputManager.wasKeyPressed('Digit1')) {
-        timeController.setState(TimeState.REALTIME);
-      } else if (inputManager.wasKeyPressed('Digit2')) {
-        timeController.setState(TimeState.DILATED);
-      } else if (inputManager.wasKeyPressed('Digit3')) {
-        timeController.setState(TimeState.PAUSED);
-      } else if (inputManager.wasKeyPressed('KeyP')) {
-        sceneManager.setState(sceneManager.isPaused ? SceneState.GAMEPLAY : SceneState.PAUSED);
-      }
+      // Last, so the renderer counters it reports describe the frame that has
+      // just been drawn rather than the one before it.
+      debugOverlay.update(frame);
     });
 
     window.__ASTRA__ = {
@@ -225,6 +256,7 @@ async function boot(): Promise<void> {
       worldScene,
       movement,
       cameraController,
+      debugOverlay,
     };
 
     // --- Boot --------------------------------------------------------------
