@@ -2,7 +2,7 @@
  * WorldScene.ts - ASTRA world
  * =============================================================================
  * Composes everything that is visible and physical in the world right now: the
- * ground plane, the sky dome, the light rig, the depth fog and the player.
+ * ground, the stream, the sky dome, the light rig, the depth fog and the player.
  *
  * This is the single place Step 2 will grow. Terrain, the stream, the forest,
  * the corruption and the post-processing pipeline all attach here, and callers
@@ -40,7 +40,10 @@ import { SkySystem, DEFAULT_HORIZON_COLOR } from '../renderer/SkySystem';
 import type { PhysicsWorld, Vec3 } from '../physics/PhysicsWorld';
 import { Player, PLAYER_HEIGHT, PLAYER_SPAWN } from '../player/Player';
 import { Terrain } from './Terrain';
-import type { StreamSpline } from '../procedural/StreamSpline';
+import { Stream } from './Stream';
+import type { SplinePoint, StreamSpline } from '../procedural/StreamSpline';
+import type { WaterMaterialOptions as StreamWaterOptions } from '../procedural/WaterShader';
+import type { WaterAudioOptions as StreamAudioOptions } from '../audio/WaterAudio';
 
 /**
  * Fog distances tuned for a 500m terrain viewed from ~8m out.
@@ -91,10 +94,30 @@ export interface WorldSceneOptions {
     /** The stream path the valley is carved along. */
     spline?: StreamSpline;
   };
+  /**
+   * Stream generation parameters. Defaults to the standard sweep.
+   *
+   * Pass `moteCount: 0` to build the water without the drifting sprites, and
+   * omit `audio` entirely to build it without sound - which is what the tests
+   * do, because there is no `AudioContext` in Node.
+   */
+  stream?: {
+    /** The stream path. Defaults to the terrain's own spline. */
+    spline?: StreamSpline;
+    /** World seed. Defaults to the terrain's. */
+    seed?: number;
+    /** Number of drifting motes on the surface. */
+    moteCount?: number;
+    /** Water material overrides. */
+    water?: StreamWaterOptions;
+    /** Audio overrides. Omit to run silent. */
+    audio?: StreamAudioOptions;
+  };
 }
 
 export class WorldScene {
   readonly terrain: Terrain;
+  readonly stream: Stream;
   readonly sky: SkySystem;
   readonly lighting: LightingSystem;
   readonly player: Player;
@@ -141,7 +164,20 @@ export class WorldScene {
       height: options.playerHeight,
     });
 
+    // The stream is built against the terrain that was just generated, and
+    // against the *same* spline: the valley was carved along it, so a stream on
+    // any other path would run through uncarved ground and float.
+    this.stream = new Stream({
+      spline: options.stream?.spline ?? this.terrain.stream,
+      heightAt: (x, z) => this.terrain.heightAt(x, z),
+      seed: options.stream?.seed ?? options.terrain?.seed,
+      moteCount: options.stream?.moteCount,
+      water: options.stream?.water,
+      audio: options.stream?.audio,
+    });
+
     this.terrain.addTo(this.scene);
+    this.stream.addTo(this.scene);
     this.sky.addTo(this.scene);
     this.lighting.addTo(this.scene);
     this.player.addTo(this.scene);
@@ -196,13 +232,20 @@ export class WorldScene {
    *
    * Pass `TimeController.getDelta()` - never a raw engine delta - so time
    * dilation and pause apply to the world automatically.
+   *
+   * `listener` is where the ears are, which is the camera rather than the
+   * player: the stream's sound is placed relative to it. Omit it and the
+   * player's own body is used, which is close enough for anything that does not
+   * move the camera independently - and is what keeps this callable with one
+   * argument, as it always has been.
    */
-  update(delta: number): void {
+  update(delta: number, listener?: SplinePoint): void {
     if (this.disposed) return;
     if (!Number.isFinite(delta) || delta < 0) return;
 
     this.elapsed += delta;
     this.sky.update(delta);
+    this.stream.update(delta, listener ?? this.player.position);
     this.player.syncMesh();
   }
 
@@ -212,6 +255,7 @@ export class WorldScene {
     this.disposed = true;
 
     this.terrain.removeFrom(this.scene);
+    this.stream.removeFrom(this.scene);
     this.sky.removeFrom(this.scene);
     this.lighting.removeFrom(this.scene);
     this.player.removeFrom(this.scene);
@@ -219,6 +263,7 @@ export class WorldScene {
     this.scene.fog = null;
 
     this.terrain.dispose();
+    this.stream.dispose();
     this.sky.dispose();
     this.lighting.dispose();
     this.player.dispose();

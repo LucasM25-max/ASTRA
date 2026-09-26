@@ -128,12 +128,18 @@ describe('generateTerrain', () => {
     });
 
     it('is flat when every height term is zeroed', () => {
+      // Every additive term, not just the obvious ones. The valley carve and
+      // the stream channel are both subtractive and both centred on the
+      // spline, so leaving either on leaves a real gradient behind - a "flat"
+      // reference that is not flat silently invalidates every comparison made
+      // against it.
       const data = gen({
         size: 100,
         hillAmplitude: 0,
         rimAmplitude: 0,
         rimLift: 0,
         valleyDepth: 0,
+        channelDepth: 0,
       });
       for (let i = 0; i < data.heights.length; i++) expect(data.heights[i]).toBe(0);
       expect(data.minHeight).toBe(0);

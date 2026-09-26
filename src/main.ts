@@ -47,6 +47,7 @@ import { CameraController } from './renderer/CameraController';
 import { RenderPipeline } from './renderer/RenderPipeline';
 import { PhysicsWorld } from './physics/PhysicsWorld';
 import { MovementController } from './player/MovementController';
+import { PLAYER_HALF_HEIGHT, type Player } from './player/Player';
 import { WorldScene } from './world/WorldScene';
 import { DEFAULT_FOG_FAR, DEFAULT_FOG_NEAR } from './world/WorldScene';
 
@@ -69,6 +70,86 @@ declare global {
   interface Window {
     __ASTRA__?: AstraDebugHandle;
   }
+}
+
+/**
+ * Depth of water, in metres, at which wading costs the player nothing.
+ *
+ * Below this the water is a film on the ground and should not be felt at all -
+ * a drag that starts at zero depth makes every puddle on the bank sticky.
+ */
+const WADE_START_DEPTH = 0.12;
+
+/**
+ * Depth of water, in metres, at which wading is at its slowest.
+ *
+ * The stream is about 0.45 m deep at its centre, so this is reached in the
+ * middle of the channel and never exceeded: the player wades through the
+ * stream, they do not swim, and Step 2.2 rules swimming out of scope.
+ */
+const WADE_FULL_DEPTH = 0.45;
+
+/**
+ * Fraction of horizontal speed retained in water `WADE_FULL_DEPTH` deep.
+ *
+ * 0.45 is a deliberate number. It is slow enough that crossing the stream is a
+ * decision rather than something that happens while the player is looking
+ * elsewhere, and fast enough that it never feels like the controls have failed.
+ * Below `WADE_START_DEPTH` nothing is removed at all, so the bank and the
+ * shallows are unaffected.
+ */
+const WADE_SPEED_RETENTION = 0.45;
+
+/**
+ * Fraction of upward velocity retained per fixed step in deep water.
+ *
+ * Only the vertical component, and only the *upward* one: this is what makes a
+ * jump in the stream feel like a jump in water rather than a jump on land. A
+ * downward velocity is left alone, because sinking is what water does and
+ * damping it would make the player bob.
+ */
+const WADE_JUMP_RETENTION = 0.55;
+
+/**
+ * Scale the player's velocity for the water they are standing in.
+ *
+ * Takes the scene and the player rather than closing over them, so it is a pure
+ * function of its arguments and can be driven directly by a test.
+ *
+ * Reads the stream's depth profile at the player's feet and damps horizontal
+ * speed and upward speed in proportion. Nothing is written when the player is
+ * on dry ground, so the common case costs one distance query and nothing else.
+ *
+ * The depth is measured from the *feet*, not the body centre: a capsule 1.8 m
+ * tall standing in 0.3 m of water has its centre 0.9 m above the surface, and
+ * asking the centre how deep the water is would answer "not in the water at
+ * all" - which is the classic version of this bug, and it is invisible until
+ * someone walks into a stream.
+ */
+function applyWadingDrag(delta: number, scene: WorldScene, player: Player): void {
+  void delta;
+  const body = player.body;
+  if (body === undefined) return;
+
+  const centre = body.translation();
+  const submersion = scene.stream.submersionAt(centre.x, centre.z, centre.y - PLAYER_HALF_HEIGHT);
+  if (submersion <= WADE_START_DEPTH) return;
+
+  // 0 at the threshold, 1 in water deep enough to be a real obstacle.
+  // Smoothstep rather than a linear ramp, so the transition has no corner in it
+  // that the player can feel as a sudden gear change.
+  const t = Math.min(1, (submersion - WADE_START_DEPTH) / (WADE_FULL_DEPTH - WADE_START_DEPTH));
+  const wade = t * t * (3 - 2 * t);
+
+  const v = body.linvel();
+  const horizontal = 1 - (1 - WADE_SPEED_RETENTION) * wade;
+  const lift = v.y > 0 ? 1 - (1 - WADE_JUMP_RETENTION) * wade : 1;
+
+  // The velocity is scaled, not an impulse applied: Rapier integrates whatever
+  // velocity it finds at the step, so scaling the velocity scales the distance
+  // travelled this step by exactly the same factor. An impulse here would need
+  // a `delta` and would be wrong by whatever the step turned out to be.
+  body.setLinvel({ x: v.x * horizontal, y: v.y * lift, z: v.z * horizontal }, true);
 }
 
 function showBootError(message: string): void {
@@ -218,8 +299,23 @@ async function boot(): Promise<void> {
     // reads the other's state - so the order is not load-bearing, but writing
     // first reads more naturally: the controller decides where the player goes,
     // then the world moves them there.
+    //
+    // Wading sits between the two, and the position is load-bearing. It reads
+    // the velocity the controller has just written and damps it, so it has to
+    // run after `movement.fixedUpdate`; and it has to run before
+    // `worldScene.fixedUpdate`, because that is what calls `physics.step` and
+    // Rapier integrates whatever velocity it finds at that moment. Applying the
+    // drag after the step would be a frame late - the player would glide one
+    // whole fixed step at full speed through the shallows before slowing down.
+    //
+    // It lives here rather than in `MovementController` on purpose. Step 2.2's
+    // scope guardrails rule out touching the controller, and the drag is not a
+    // movement rule anyway: it is a property of the water, and it is driven by
+    // the stream's own depth profile. When Step 2.4 gives the stream a physical
+    // volume this hook moves with it.
     engine.onFixedUpdate((delta) => {
       movement.fixedUpdate(delta);
+      applyWadingDrag(delta, worldScene, worldScene.player);
       worldScene.fixedUpdate(delta);
     });
 
@@ -238,7 +334,10 @@ async function boot(): Promise<void> {
     // everything else.
     engine.onRender((frame) => {
       cameraController.update(frame.realDelta);
-      worldScene.update(timeController.getDelta());
+      // The camera, not the player, is the listener: the stream's sound should
+      // come from where the player is looking, and the camera is what follows
+      // the player through the world.
+      worldScene.update(timeController.getDelta(), renderPipeline.camera.position);
       renderPipeline.render();
       // Last, so the renderer counters it reports describe the frame that has
       // just been drawn rather than the one before it.

@@ -57,6 +57,36 @@ The full build plan lives in [`plan.md`](./plan.md).
   panel writes no DOM at all, and a visible one repaints at 20Hz rather than
   every frame.
 
+**Phase 2 — Living World**
+
+- **Step 2.1 — Procedural Terrain** (complete): a 384×384 heightmap over 500 m
+  (~1.3 m cells, ~293k triangles) built from layered Perlin and Voronoi noise —
+  hills, a broad valley, a rim ramp that lifts the edges so the world does not
+  end at a cliff, and four biomes blended by height and slope. The mesh, its
+  per-vertex colours and its collider data all come from one array, so the
+  ground you see and the ground you walk on cannot drift apart. The collider is
+  a triangle mesh; see the heightfield note below.
+- **Step 2.2 — The Fouled Stream** (complete): a Catmull-Rom stream spline with a
+  variable 1–3 m width sampled from noise, an extruded water ribbon, and a
+  procedural water material that scrolls a flow vector along the spline, fades
+  the shoreline by depth, distorts its normals with animated noise and reflects
+  a gradient sky analytically — no texture files anywhere. The stream carries a
+  pollution value that runs 0.9 at the cave end through 0.6 midstream to 0.2 at
+  the village, and the material interpolates between a clean blue-green state
+  and a green-brown scummed one. Flowing point sprites drift downstream, and a
+  synthesised water loop is spatialised through Howler.js.
+  The terrain generator carves a channel for the stream along the same spline,
+  with a designed cross-section: a flat bed, a climb that crosses the water
+  surface exactly at the stream's nominal half-width, and a flat bank top that
+  carries the ribbon's edge under ground. That last part is not decoration —
+  the water's surface height is read back off the terrain, so a channel the
+  1.3 m grid cannot represent leaves the water's edge floating. Measured across
+  seeds, the ribbon's edge sits 0.17–0.19 m under ground at its worst spot and
+  the centre depth stays within 0.04 m of the designed 0.45 m.
+  Wading is drag, not collision: the player's horizontal velocity and jump are
+  scaled down between 0.12 m and 0.45 m of submersion. No changes to
+  `MovementController.ts`, and no swimming.
+
 ---
 
 ## Getting started
@@ -87,6 +117,8 @@ src/
 │   ├── InputManager.ts            Keyboard + mouse capture
 │   ├── SceneManager.ts            Macro state machine
 │   └── TimeController.ts          Game time, dilation and pause
+├── audio/
+│   └── WaterAudio.ts              Synthesised flowing-water loop, spatialised
 ├── debug/
 │   ├── DebugGizmos.ts             Terrain-spanning measurement grid + origin axes
 │   ├── DebugHud.ts                The DOM panel: FPS, frame time, counters
@@ -96,8 +128,10 @@ src/
 ├── procedural/
 │   ├── NoiseLibrary.ts            Perlin, Simplex, Voronoi, FBM — JS and GLSL
 │   ├── StreamSpline.ts            Catmull-Rom spline with an arc-length LUT
-│   ├── TerrainGenerator.ts        384×384 heightmap, biomes, mesh + collider data
-│   └── MaterialFactory.ts         Triplanar terrain material (no texture files)
+│   ├── StreamGenerator.ts         Stream profile + extruded water ribbon
+│   ├── TerrainGenerator.ts        384×384 heightmap, biomes, channel, collider data
+│   ├── MaterialFactory.ts         Triplanar terrain material (no texture files)
+│   └── WaterShader.ts             Procedural water: flow, Fresnel, shoreline, sky
 ├── player/
 │   ├── Player.ts                  Capsule mesh + dynamic body, synced per frame
 │   └── MovementController.ts      WASD, walk/run, jump, slopes, camera-relative
@@ -108,7 +142,8 @@ src/
 │   └── SkySystem.ts               Gradient sky dome
 └── world/
     ├── Terrain.ts                 Façade over the heightmap + its collider
-    └── WorldScene.ts              Composes terrain + sky + lights + fog + player
+    ├── Stream.ts                  Water mesh, motes, queries, spatialised audio
+    └── WorldScene.ts              Composes terrain + sky + lights + fog + stream + player
 ```
 
 ### The loop
@@ -227,8 +262,8 @@ __ASTRA__.physics.stepCount            // fixed steps taken so far
 
 - **Rapier** is installed as `@dimforge/rapier3d-compat`: it ships its ~3 MB WASM
   inline as base64, so it works in Vite, in Node and in the test runner with no
-  bundler plugins. The cost is bundle size — the production bundle is ~4.9 MB
-  (~1.8 MB gzipped), almost all of it that base64. Switching to
+  bundler plugins. The cost is bundle size — the production bundle is ~5.0 MB
+  (~1.84 MB gzipped), almost all of it that base64. Switching to
   `@dimforge/rapier3d` would emit the WASM as a separate, stream-compilable,
   independently cacheable asset (~250 kB of JS plus a 3 MB `.wasm`), at the price
   of wasm-loader configuration and a test-runner setup that no longer works out
@@ -240,7 +275,7 @@ __ASTRA__.physics.stepCount            // fixed steps taken so far
 - **Boot is async.** Rapier's WASM must be initialised before a `World` can
   exist, so `main.ts` exports a `ready` promise that tests await. `index.html`
   needs no change — the module auto-starts.
-- 508 tests across 23 files, including a jsdom integration test that runs the
+- 616 tests across 26 files, including a jsdom integration test that runs the
   real `main.ts` bootstrap end to end and walks, runs, jumps, orbits and dilates
   through it.
 - **The terrain collider is a triangle mesh, not a Rapier heightfield.**

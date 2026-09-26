@@ -255,9 +255,31 @@ export class StreamSpline {
    * 1000 segments x 9000 points instead of 147k x 1000.
    */
   distanceField(size: number, resolution: number, maxInfluence = 90): Float32Array {
-    if (!(size > 0)) throw new RangeError(`[StreamSpline] distanceField size must be positive`);
+    return this.nearestField(size, resolution, maxInfluence).distance;
+  }
+
+  /**
+   * Both fields the terrain needs, in one pass over the grid.
+   *
+   * `distanceField` and `arcLengthField` cannot be computed independently: the
+   * arc length has to be stamped only where the *distance* improves, or a
+   * vertex near a segment junction would end up with the arc length of
+   * whichever segment was visited last rather than the nearest one. Doing both
+   * together also halves the work, which matters because this is the single
+   * most expensive call in terrain generation.
+   *
+   * Points beyond `maxInfluence` get `maxInfluence` for the distance and 0 for
+   * the arc length - they are far enough away that neither field is meaningful.
+   */
+  nearestField(
+    size: number,
+    resolution: number,
+    maxInfluence = 90,
+  ): { distance: Float32Array; arcLength: Float32Array } {
+    if (!(size > 0)) throw new RangeError(`[StreamSpline] nearestField size must be positive`);
     const res = Math.max(2, Math.floor(resolution));
-    const out = new Float32Array(res * res).fill(maxInfluence);
+    const distance = new Float32Array(res * res).fill(maxInfluence);
+    const arcLength = new Float32Array(res * res);
 
     const half = size / 2;
     const step = size / (res - 1);
@@ -282,6 +304,9 @@ export class StreamSpline {
       const abz = b.z - a.z;
       const lenSq = abx * abx + abz * abz;
 
+      const segStart = this.cumulative[s];
+      const segLength = this.cumulative[s + 1] - segStart;
+
       for (let i = i0; i <= i1; i++) {
         const z = -half + i * step;
         const rowBase = i * res;
@@ -294,12 +319,15 @@ export class StreamSpline {
           }
           const d = Math.hypot(a.x + abx * t - x, a.z + abz * t - z);
           const k = rowBase + j;
-          if (d < out[k]) out[k] = d;
+          if (d < distance[k]) {
+            distance[k] = d;
+            arcLength[k] = segStart + t * segLength;
+          }
         }
       }
     }
 
-    return out;
+    return { distance, arcLength };
   }
 
   /** Uniform Catmull-Rom at parameter `t` in [0, segments]. */

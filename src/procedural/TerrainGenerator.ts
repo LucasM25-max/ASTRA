@@ -44,6 +44,7 @@
 import { BufferAttribute, BufferGeometry, Float32BufferAttribute, Matrix4, PlaneGeometry } from 'three';
 import { PerlinNoise2D, SimplexNoise2D, fbm2D, ridged2D, voronoiF1Normalized } from './NoiseLibrary';
 import { StreamSpline } from './StreamSpline';
+import { BANK_MARGIN, BANK_PLATEAU, BANK_RISE, StreamProfile } from './StreamGenerator';
 
 /** Side length of the terrain, in metres. From the plan: 500m x 500m. */
 export const TERRAIN_SIZE = 500;
@@ -86,6 +87,69 @@ export const DEFAULT_VALLEY_WIDTH = 26;
 
 /** Distance from the stream beyond which the ground is no longer "bank". */
 export const DEFAULT_BANK_WIDTH = 18;
+
+/**
+ * Depth of the narrow channel cut into the valley floor for the stream.
+ *
+ * The valley carve is 4.5 m deep but 26 m wide - a valley, not a channel.
+ * Measured on the default terrain, the ground rises only 0.076 m between the
+ * spline and 1.5 m either side of it, so a 1-3 m wide ribbon of water has
+ * nothing to nestle against: without this carve its edges float above the
+ * ground, and the water depth is whatever offset the ribbon was given rather
+ * than a real channel.
+ *
+ * 1.1 m with a width that tracks the stream's own half-width leaves the ribbon
+ * edges buried across the whole 1-3 m range. The margin has to cover the
+ * terrain's own small-scale roughness as well as the channel's shape: measured
+ * on the default terrain the uncarved ground drops up to 0.3 m between the
+ * spline and the ribbon's edge, and at 0.8 m of carve that was enough to leave
+ * spots only 9 mm deep - a stream that nearly vanishes. 1.1 m keeps the
+ * shallowest point above 0.3 m.
+ */
+export const DEFAULT_CHANNEL_DEPTH = 1.1;
+
+/** Channel half-width as a multiple of the stream's half-width at that point. */
+export const DEFAULT_CHANNEL_WIDTH_FACTOR = 1.0;
+
+/** Extra rise of the bank above the water surface, in metres. */
+/**
+ * How far below the lowest ground in the band the top of the bank sits, in
+ * metres. Small on purpose: this is what decides how incised the stream looks.
+ * `drop` has to exceed `depth + BANK_MARGIN` for the carve to stay a lowering,
+ * and this is the slack on top of that.
+ */
+const CHANNEL_BANK = 0.12;
+
+/**
+ * How far past the ribbon's own edge the carve continues, in metres.
+ *
+ * It has to reach at least one grid cell beyond, because the ribbon's edge
+ * vertex is read back through the grid's bilinear interpolation and its stencil
+ * spans half a cell either side of it. Stopping the carve at the edge leaves
+ * that stencil on uncarved ground, and on a hillside that drops away the water's
+ * edge then floats by whatever the hill dropped - measured at 0.85 m on the
+ * default terrain before this was added.
+ */
+const CHANNEL_CARVE_MARGIN = 2;
+
+/**
+ * Spacing of the channel's cross-sections along the stream, in metres.
+ *
+ * Finer than the terrain grid on purpose. The ribbon walks the spline in its
+ * own even steps and reads the bed back through `heightAt`, so the two
+ * parameterizations have to agree to within the bed's slope times the spacing.
+ * At the terrain's own 1.3 m step and a bed that climbs 0.35 m per step near
+ * the map's rim, that error was 0.09 m - more than the 0.06 m the bank margin
+ * provides, and the water's edge floated. A quarter-metre spacing puts the
+ * error at 0.02 m.
+ */
+const CHANNEL_CROSS_STEP = 0.25;
+
+/** Width of the moving average that smooths the bed along the flow, in metres. */
+const CHANNEL_BED_SMOOTHING = 4;
+
+/** Samples taken across the flow when measuring and carving the channel. */
+const CHANNEL_SAMPLES = 17;
 
 /** The four biomes the terrain blends between. */
 export const BIOME_GRASS = 0;
@@ -136,6 +200,21 @@ export interface TerrainGeneratorOptions {
   valleyWidth?: number;
   /** How far from the stream still counts as bank. */
   bankWidth?: number;
+  /**
+   * Depth of the stream channel cut into the valley floor. 0 disables it.
+   *
+   * Defaults to `DEFAULT_CHANNEL_DEPTH`. The width of the carve tracks the
+   * stream's own half-width, so the channel and the water in it always agree.
+   */
+  channelDepth?: number;
+  /** Channel half-width as a multiple of the stream's half-width. */
+  channelWidthFactor?: number;
+  /** Stream width knobs, forwarded to the profile that sizes the channel. */
+  stream?: {
+    seed?: number;
+    width?: number;
+    widthVariation?: number;
+  };
 }
 
 /** Everything the terrain produced, in one object. */
@@ -178,6 +257,231 @@ function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
+/**
+ * Blur the stream bed across the direction of flow.
+ *
+ * A level water surface can only sit in a bed that is itself level-ish. The
+ * hills carry five octaves and the top two have wavelengths/**
+ * Replace the ground in a narrow band around the spline with a designed
+ * channel cross-section.
+ *
+ * Why not a Gaussian dimple
+ * -------------------------
+ * The obvious carve - subtract a Gaussian centred on the spline - cannot work,
+ * and the reason is measurable. On the default terrain the stream runs across a
+ * hillside near u = 0.9, where the ground drops 0.83 m between the spline and
+ * 1.5 m to one side of it. A level water surface has to be above the bed in the
+ * middle and below the ground at the ribbon's edge; with a Gaussian carve the
+ * edge is lower than the middle by more than the carve provides, so no height
+ * satisfies both and the water either floats at the edge or vanishes in the
+ * middle. Deepening the Gaussian to fix it takes a 2 m gouge.
+ *
+ * Averages do not help either: blurring the bed across the flow removes
+ * curvature but preserves a linear slope, which is exactly the problem here.
+ *
+ * What does work
+ * --------------
+ * Give the channel a designed cross-section. The bed is flat across the flow
+ * and follows the lowest ground in the band, so it still runs downhill; from
+ * the edge of the bed it climbs to a little above the water surface, stays
+ * flat there across the ribbon's edge, and only then blends back to the hills.
+ * Every point of the designed profile sits at or below the lowest original
+ * ground in the band, so the carve can only ever lower the terrain - it never
+ * raises a ridge, and the water's edge is always buried.
+ *
+ * Two widths in that profile exist only because of the grid. The climb has to
+ * span more than a cell (`BANK_RISE`), or there is no vertex on the flat bed and
+ * the water's surface reads back too high; and the flat top has to span a cell
+ * (`BANK_PLATEAU`), or the ribbon's edge lands on a slope the grid can only
+ * approximate. Both were measured, not guessed: with a 1.3 m rise the edge
+ * floated 6 cm, and widening the rise to 2.2 m plus a 1.3 m shelf took the
+ * worst burial from 3 cm to 17 cm across ten seeds.
+ *
+ * `StreamProfile.surfaceHeightAt` reads this shape back as "the lowest ground
+ * under the ribbon, plus the depth", so the water and the channel agree without
+ * either module holding state the other can drift from.
+ */
+function carveStreamChannel(
+  heights: Float32Array,
+  resolution: number,
+  step: number,
+  half: number,
+  spline: StreamSpline,
+  profile: StreamProfile,
+): void {
+  /** Bilinear sample of `heights`, with the grid edges clamped. */
+  const sample = (x: number, z: number): number => {
+    const fx = (x + half) / step;
+    const fz = (z + half) / step;
+    const j = Math.min(resolution - 2, Math.max(0, Math.floor(fx)));
+    const i = Math.min(resolution - 2, Math.max(0, Math.floor(fz)));
+    const tx = Math.min(1, Math.max(0, fx - j));
+    const tz = Math.min(1, Math.max(0, fz - i));
+    const k00 = i * resolution + j;
+    const k10 = k00 + 1;
+    const k01 = k00 + resolution;
+    const k11 = k01 + 1;
+    const a = heights[k00] + (heights[k10] - heights[k00]) * tx;
+    const b = heights[k01] + (heights[k11] - heights[k01]) * tx;
+    return a + (b - a) * tz;
+  };
+
+  /** Unit left-hand normal of the spline at an arc position, in the XZ plane. */
+  const normalAt = (a: number): { x: number; z: number } => {
+    const t = spline.tangentAtDistance(a);
+    const len = Math.hypot(t.x, t.z);
+    if (len < 1e-9) return { x: 1, z: 0 };
+    return { x: -t.z / len, z: t.x / len };
+  };
+
+  const length = spline.length;
+  if (!(length > 0)) return;
+
+  // How far below the lowest ground in the band the bed sits. Chosen so the
+  // designed profile at the outer edge of the bank lands just under that lowest
+  // ground, which is what keeps the whole carve a lowering.
+  const drop = profile.depth + BANK_MARGIN + CHANNEL_BANK + 0.05;
+
+  // 1. Bed level at each cross-section. Read before anything is written, so a
+  //    later cross-section can never measure an already-carved one.
+  const crossCount = Math.max(2, Math.ceil(length / CHANNEL_CROSS_STEP) + 1);
+  const crossArc = new Float32Array(crossCount);
+  const raw = new Float32Array(crossCount);
+
+  for (let c = 0; c < crossCount; c++) {
+    const a = Math.min(length, c * CHANNEL_CROSS_STEP);
+    crossArc[c] = a;
+
+    const p = spline.pointAtDistance(a);
+    const n = normalAt(a);
+    const reach = profile.ribbonHalfWidthAtDistance(a) + CHANNEL_CARVE_MARGIN;
+
+    let lowest = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < CHANNEL_SAMPLES; i++) {
+      const off = -reach + (2 * reach * i) / (CHANNEL_SAMPLES - 1);
+      const h = sample(p.x + n.x * off, p.z + n.z * off);
+      if (h < lowest) lowest = h;
+    }
+    raw[c] = Number.isFinite(lowest) ? lowest : 0;
+  }
+
+  // Smooth the bed along the flow with a sliding mean, then clamp it back under
+  // the local minimum. The mean is what stops the bed following every bump in
+  // the hills; the clamp is what stops the smoothing from lifting the bed above
+  // ground it was measured below, which would turn the carve into a fill.
+  const radius = Math.max(1, Math.round(CHANNEL_BED_SMOOTHING / CHANNEL_CROSS_STEP));
+  const smoothed = new Float32Array(crossCount);
+  let running = 0;
+  for (let c = 0; c <= Math.min(radius, crossCount - 1); c++) running += raw[c];
+  for (let c = 0; c < crossCount; c++) {
+    const lo = Math.max(0, c - radius);
+    const hi = Math.min(crossCount - 1, c + radius);
+    // Recompute rather than slide: clamping the window at the ends makes a
+    // running sum drift, and the ends are exactly where the spline runs into
+    // the rim ramp.
+    let sum = 0;
+    for (let k = lo; k <= hi; k++) sum += raw[k];
+    smoothed[c] = sum / (hi - lo + 1);
+  }
+  for (let c = 0; c < crossCount; c++) {
+    smoothed[c] = Math.min(smoothed[c], raw[c]) - drop;
+  }
+
+  // 2. Replace the ground inside the footprint, walking the same cross-sections
+  //    the ribbon walks.
+  //
+  //    This is the part that has to match exactly. An earlier version keyed the
+  //    carve off each grid vertex's *nearest* point on the spline, while the
+  //    ribbon places its vertices by offsetting perpendicular from a
+  //    cross-section's own arc position. On a curve those are different
+  //    parameterizations - the nearest point to a vertex beside cross-section
+  //    `a` is generally not `a` - so the channel came out lopsided and the
+  //    water's edge floated by up to 0.85 m. Walking the cross-sections on both
+  //    sides removes the disagreement.
+  //
+  //    The bands overlap, because consecutive cross-sections are 0.25 m apart
+  //    and each band is several metres wide. Taking the lowest designed value
+  //    across the overlap - the obvious rule, and the first one tried - drags
+  //    every bank down to the level of the cross-section upstream of it, which
+  //    on a bed that climbs is the lowest one. Each vertex is therefore assigned
+  //    to the single cross-section it is nearest to along the flow.
+  const carved = new Map<number, { along: number; value: number }>();
+
+  for (let c = 0; c < crossCount; c++) {
+    const a = crossArc[c];
+    const p = spline.pointAtDistance(a);
+    const n = normalAt(a);
+    const tangent = spline.tangentAtDistance(a);
+    // Flat bed out to here, then a climb that crosses the water surface at the
+    // stream's nominal half-width, clears it at the ribbon's edge, and blends
+    // back to the hills a little way beyond that.
+    const flatTo = profile.bedHalfWidthAtDistance(a);
+    const bankTop = flatTo + BANK_RISE;
+    const plateauEnd = bankTop + BANK_PLATEAU;
+    const reach = plateauEnd + CHANNEL_CARVE_MARGIN;
+    const level = smoothed[c];
+    const climb = profile.depth + BANK_MARGIN;
+
+    // Bounding box of the band, in grid indices.
+    const ex = n.x * reach;
+    const ez = n.z * reach;
+    const j0 = Math.max(0, Math.ceil((Math.min(p.x - ex, p.x + ex) + half) / step));
+    const j1 = Math.min(resolution - 1, Math.floor((Math.max(p.x - ex, p.x + ex) + half) / step));
+    const i0 = Math.max(0, Math.ceil((Math.min(p.z - ez, p.z + ez) + half) / step));
+    const i1 = Math.min(resolution - 1, Math.floor((Math.max(p.z - ez, p.z + ez) + half) / step));
+
+    for (let i = i0; i <= i1; i++) {
+      const z = -half + i * step;
+      const rowBase = i * resolution;
+      for (let j = j0; j <= j1; j++) {
+        const x = -half + j * step;
+        const dx = x - p.x;
+        const dz = z - p.z;
+        const across = dx * n.x + dz * n.z;
+        const d = Math.abs(across);
+        if (d >= reach) continue;
+
+        const k = rowBase + j;
+        // Distance along the flow from this cross-section, used to decide which
+        // cross-section owns the vertex when the bands overlap.
+        const along = dx * tangent.x + dz * tangent.z;
+
+        const previous = carved.get(k);
+        if (previous !== undefined && Math.abs(previous.along) <= Math.abs(along)) continue;
+
+        // Flat bed under the water, then a rise that clears the surface by the
+        // bank margin, then a flat shelf out to the ribbon's edge. The bed is
+        // flat so the water's surface height reads back exactly - a sloped bed
+        // would put a gradient under the ribbon for the terrain grid's bilinear
+        // interpolation to get wrong, and that error is what left the water
+        // floating at its edge.
+        const top = level + climb;
+        let value = level + climb * smoothstep(flatTo, bankTop, d);
+
+        // Past the top of the rise the bank is flat out to the ribbon's edge and
+        // only then blends back toward the hills. It never drops below the top
+        // of the rise: the ribbon's edge vertex is read through the grid's
+        // interpolation, its stencil reaches this far, and ground below the
+        // waterline there would show as a gap. The flat shelf is what makes
+        // that guarantee survive the grid - a climb that is still rising where
+        // the ribbon ends leaves the edge on a slope the grid can only
+        // approximate, and a 1.3 m cell approximates it badly.
+        if (d >= bankTop) {
+          const fade = smoothstep(plateauEnd, reach, d);
+          const original = heights[k];
+          const blended = top + (original - top) * fade;
+          value = Math.max(blended, top);
+        }
+
+        carved.set(k, { along, value });
+      }
+    }
+  }
+
+  for (const [k, entry] of carved) heights[k] = entry.value;
+
+}
+
 export function generateTerrain(options: TerrainGeneratorOptions = {}): TerrainData {
   const size = options.size ?? TERRAIN_SIZE;
   const resolution = Math.max(2, Math.floor(options.resolution ?? TERRAIN_RESOLUTION));
@@ -197,6 +501,19 @@ export function generateTerrain(options: TerrainGeneratorOptions = {}): TerrainD
   const valleyDepth = options.valleyDepth ?? DEFAULT_VALLEY_DEPTH;
   const valleyWidth = options.valleyWidth ?? DEFAULT_VALLEY_WIDTH;
   const bankWidth = options.bankWidth ?? DEFAULT_BANK_WIDTH;
+  const channelDepth = options.channelDepth ?? DEFAULT_CHANNEL_DEPTH;
+  const channelWidthFactor = options.channelWidthFactor ?? DEFAULT_CHANNEL_WIDTH_FACTOR;
+
+  if (!(channelDepth >= 0)) {
+    throw new RangeError(
+      `[TerrainGenerator] channelDepth must be non-negative, received ${String(channelDepth)}`,
+    );
+  }
+  if (!(channelWidthFactor > 0)) {
+    throw new RangeError(
+      `[TerrainGenerator] channelWidthFactor must be positive, received ${String(channelWidthFactor)}`,
+    );
+  }
 
   // Three independent noise fields, each with its own seed offset so that
   // changing the world seed changes all of them coherently rather than
@@ -207,7 +524,21 @@ export function generateTerrain(options: TerrainGeneratorOptions = {}): TerrainD
   const patches = new SimplexNoise2D(seed + 0x9a7c);
 
   const heights = new Float32Array(resolution * resolution);
-  const distanceToStream = spline.distanceField(size, resolution);
+
+  // One pass for both fields: the arc length is only valid where it belongs to
+  // the nearest point, so the two have to be stamped together. See
+  // `StreamSpline.nearestField`.
+  const distanceToStream = spline.nearestField(size, resolution).distance;
+
+  // Sizes the channel so it always matches the water that will sit in it.
+  const streamProfile =
+    channelDepth > 0
+      ? new StreamProfile(spline, {
+          seed: options.stream?.seed ?? seed,
+          width: options.stream?.width,
+          widthVariation: options.stream?.widthVariation,
+        })
+      : null;
 
   const half = size / 2;
   const step = size / (resolution - 1);
@@ -256,6 +587,12 @@ export function generateTerrain(options: TerrainGeneratorOptions = {}): TerrainD
       if (h < minHeight) minHeight = h;
       if (h > maxHeight) maxHeight = h;
     }
+  }
+
+  // The stream needs a channel with a designed cross-section, not a Gaussian
+  // dimple. See the function for why the obvious approach fails.
+  if (streamProfile !== null) {
+    carveStreamChannel(heights, resolution, step, half, spline, streamProfile);
   }
 
   // Column-major copy, for a heightfield collider. Kept even though the
