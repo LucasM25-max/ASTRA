@@ -15,7 +15,10 @@ import {
   DebugOverlay,
 } from '../src/debug/DebugOverlay';
 import { CameraController, DEFAULT_CAMERA_DISTANCE, ORBIT_MOUSE_BUTTON } from '../src/renderer/CameraController';
-import { PLAYER_HEIGHT } from '../src/player/Player';
+import {
+  PLAYER_HALF_HEIGHT,
+  PLAYER_RADIUS,
+} from '../src/player/Player';
 import { WorldScene } from '../src/world/WorldScene';
 
 /**
@@ -392,16 +395,35 @@ describe('render loop -> fixed timestep -> physics', () => {
     rig.engine.start();
     rig.step(16);
 
-    // Spawned at y = 1, the capsule floats 0.1m above the plane and must fall.
-    expect(rig.world.player.position.y).toBe(1);
+    // Spawned just clear of the terrain surface at the spawn XZ, the capsule
+    // must fall onto it - not hover, and not start already in contact.
+    const surface = rig.world.terrain.heightAt(0, 0);
+    const startY = rig.world.player.position.y;
+    expect(startY).toBeCloseTo(surface + PLAYER_HALF_HEIGHT + PLAYER_RADIUS + 0.05, 5);
 
     for (let i = 0; i < 60; i += 1) rig.step(16);
-    expect(rig.world.player.position.y).toBeLessThan(1);
+    expect(rig.world.player.position.y).toBeLessThan(startY);
 
     for (let i = 0; i < 600; i += 1) rig.step(16);
 
-    // Comes to rest standing on the ground, lowest point at y = 0.
-    expect(rig.world.player.position.y).toBeCloseTo(PLAYER_HEIGHT / 2, 3);
+    // Comes to rest standing on the terrain. The formulation that matters is
+    // "the capsule's lowest point is on the surface": that is true on flat
+    // ground and on a slope alike, and it does not depend on how the slope
+    // redistributes height between the cylinder and the spherical cap.
+    //
+    // Rapier's contact solver leaves a little slop, so this is pinned to a few
+    // centimetres - tight enough that a capsule resting at the wrong height, or
+    // on nothing at all, fails.
+    const lowest = rig.world.player.position.y - PLAYER_HALF_HEIGHT - PLAYER_RADIUS;
+    expect(lowest).toBeCloseTo(surface, 1);
+
+    // And it agrees with the slope-aware form, which says only the spherical
+    // cap gains height from the tilt: `surface + halfHeight + radius/normal.y`.
+    const normal = rig.world.terrain.normalAt(0, 0);
+    expect(rig.world.player.position.y).toBeCloseTo(
+      surface + PLAYER_HALF_HEIGHT + PLAYER_RADIUS / normal.y,
+      1,
+    );
 
     // And the mesh follows it, because the render path ran every frame.
     expect(rig.world.player.mesh.position.y).toBe(rig.world.player.position.y);

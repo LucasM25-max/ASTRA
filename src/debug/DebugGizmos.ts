@@ -29,14 +29,17 @@
 import { AxesHelper, GridHelper, type Material, type Object3D } from 'three';
 
 /** Side length of the grid, in metres. Matches `TERRAIN_SIZE`. */
-export const DEFAULT_GRID_SIZE = 100;
+export const DEFAULT_GRID_SIZE = 500;
 
 /**
- * Cells across the grid. 50 divisions over 100m is a 2m cell, which is the
+ * Cells across the grid. 250 divisions over 500m is a 2m cell, which is the
  * smallest size that reads as a measurement rather than as texture - a 1m cell
  * turns into moire at any distance.
+ *
+ * The cell size, not the division count, is the invariant: it was 2m over the
+ * old 100m terrain and it is 2m over the 500m one.
  */
-export const DEFAULT_GRID_DIVISIONS = 50;
+export const DEFAULT_GRID_DIVISIONS = 250;
 
 /** Length of the axis lines, in metres. Long enough to point, short enough to stay local. */
 export const DEFAULT_AXES_SIZE = 3;

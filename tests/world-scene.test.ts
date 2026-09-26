@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Fog, Scene } from 'three';
 import { PhysicsWorld } from '../src/physics/PhysicsWorld';
-import { PLAYER_HEIGHT, PLAYER_SPAWN } from '../src/player/Player';
+import {
+  PLAYER_HALF_HEIGHT,
+  PLAYER_HEIGHT,
+  PLAYER_RADIUS,
+  PLAYER_SPAWN,
+} from '../src/player/Player';
 import {
   DEFAULT_FOG_COLOR,
   DEFAULT_FOG_FAR,
@@ -53,20 +58,33 @@ describe('WorldScene', () => {
     expect(world.fog?.color.getHex()).toBe(DEFAULT_FOG_COLOR);
   });
 
-  it('tunes the fog so the 100m plane dissolves instead of ending', async () => {
+  it('tunes the fog so the 500m terrain dissolves instead of ending', async () => {
     const { world } = await buildScene();
 
-    // The camera sits at z = 8, so the plane's far edge is 58m away and its
-    // nearest edge 42m. The far edge must be almost fully fogged.
+    // Wide fog, as decided for Step 2.1: the ground under the player stays
+    // crisp, and the distance dissolves rather than showing a hard edge. With
+    // the camera near the centre of a 500m terrain the far rim sits about
+    // 250m away, so `far` has to reach well past that for the effect to work.
     const fogAt = (distance: number): number => {
       const { near, far } = world.fog as Fog;
       return Math.min(Math.max((distance - near) / (far - near), 0), 1);
     };
 
-    expect(fogAt(42)).toBeGreaterThan(0.3); // some haze on the near ground
-    expect(fogAt(42)).toBeLessThan(0.7); // ...but still clearly visible
-    expect(fogAt(58)).toBeGreaterThan(0.85); // the far edge is nearly gone
-    expect(fogAt(200)).toBe(1); // anything past the plane is fully fogged
+    expect(fogAt(0)).toBe(0); // the ground at the player's feet is unfogged
+    expect(fogAt(50)).toBe(0); // ...and so is the ground 50m out
+    expect(fogAt(80)).toBe(0); // haze starts exactly at the near plane
+    expect(fogAt(200)).toBeGreaterThan(0.2); // the distance is visibly hazy
+    expect(fogAt(250)).toBeGreaterThan(0.4); // the far rim recedes
+    expect(fogAt(250)).toBeLessThan(0.8); // ...but stays readable
+    expect(fogAt(400)).toBe(1); // and dissolves completely past it
+
+    // Monotonic: fog never un-fogs as distance grows.
+    let previous = -1;
+    for (let d = 0; d <= 450; d += 10) {
+      const value = fogAt(d);
+      expect(value).toBeGreaterThanOrEqual(previous);
+      previous = value;
+    }
   });
 
   it('accepts fog overrides', async () => {
@@ -77,30 +95,47 @@ describe('WorldScene', () => {
     expect(world.fog?.color.getHex()).toBe(0x123456);
   });
 
-  it('spawns the player at (0, 1, 0) with the spec dimensions', async () => {
+  it('spawns the player standing on the terrain at the spec XZ', async () => {
     const { world } = await buildScene();
 
-    expect(world.player.position).toEqual({ x: 0, y: 1, z: 0 });
+    // `PLAYER_SPAWN` still supplies the horizontal position, but the height is
+    // derived from the surface rather than assumed. On a heightmap a fixed
+    // height means spawning inside a hill about half the time, and Rapier's
+    // resolution of that is a shove in an arbitrary direction - which reads as
+    // a bug rather than as terrain.
     expect(PLAYER_SPAWN).toEqual({ x: 0, y: 1, z: 0 });
+    expect(world.player.position.x).toBe(PLAYER_SPAWN.x);
+    expect(world.player.position.z).toBe(PLAYER_SPAWN.z);
+
+    // Capsule centre sits half the player height above the ground, plus a
+    // small clearance so it starts free rather than in contact.
+    const surface = world.terrain.heightAt(PLAYER_SPAWN.x, PLAYER_SPAWN.z);
+    expect(world.player.position.y).toBeCloseTo(surface + PLAYER_HEIGHT / 2 + 0.05, 5);
+    expect(world.player.position.y).toBeGreaterThan(surface);
     expect(world.player.height).toBe(PLAYER_HEIGHT);
   });
 
-  it('honours player overrides', async () => {
+  it('honours player overrides, deriving only the height from the terrain', async () => {
     const { world } = await buildScene({
       playerSpawn: { x: 2, y: 3, z: 4 },
       playerRadius: 0.5,
       playerHeight: 2,
     });
 
-    expect(world.player.position).toEqual({ x: 2, y: 3, z: 4 });
+    // The requested y is not used - it is a suggestion, not a constraint.
+    expect(world.player.position.x).toBe(2);
+    expect(world.player.position.z).toBe(4);
+
+    const surface = world.terrain.heightAt(2, 4);
+    expect(world.player.position.y).toBeCloseTo(surface + 1 + 0.05, 5);
     expect(world.player.radius).toBe(0.5);
     expect(world.player.height).toBe(2);
   });
 
-  it('gives the world a static ground collider level with the visual plane', async () => {
+  it('gives the world a static terrain collider built from the mesh', async () => {
     const { world } = await buildScene();
 
-    // Two bodies: the fixed ground and the dynamic player.
+    // Two bodies: the fixed terrain and the dynamic player.
     expect(world.physics.world.bodies.len()).toBe(2);
 
     const fixed: number[] = [];
@@ -111,13 +146,55 @@ describe('WorldScene', () => {
     expect(fixed).toHaveLength(1);
     expect(dynamic).toHaveLength(1);
 
-    // The slab is centred below the origin so its top face lands on y = 0,
-    // level with the visual plane.
-    expect(fixed[0]).toBeCloseTo(-0.5, 6);
+    // The terrain body carries no offset, because the mesh's vertex buffer is
+    // already in world coordinates - offsetting it here would shift the
+    // collision surface away from the visual one.
+    expect(fixed[0]).toBe(0);
 
-    // The slab spans the whole 100m plane: half-extent 50 either side of the
-    // origin, matching `terrain.sizeMetres / 2`.
-    expect(world.terrain.sizeMetres).toBe(100);
+    // And it spans the whole terrain, matching `terrain.sizeMetres / 2`.
+    expect(world.terrain.sizeMetres).toBe(500);
+  });
+
+  it('makes the collision surface agree with the visual surface', async () => {
+    const { world } = await buildScene();
+
+    // The single most important property of this collider: the raycast must
+    // land on the heightmap the mesh is drawn from, not near it. A mismatch
+    // here is invisible in review and shows up as the player skating on air
+    // or sinking into a hill.
+    //
+    // Rapier rebuilds its broad phase during `step()`, so a collider added
+    // after the world was built is invisible to raycasts until one step has
+    // run. Step first, then probe.
+    world.fixedUpdate(FIXED_STEP);
+
+    const samples = [
+      { x: 0, z: 0 },
+      { x: 40, z: -60 },
+      { x: -90, z: 70 },
+      { x: 120, z: 120 },
+    ];
+    for (const { x, z } of samples) {
+      const expected = world.terrain.heightAt(x, z);
+      // Exclude the player's own capsule: it is a body in the same world, and
+      // a ray cast through it stops there instead of reaching the terrain.
+      const hit = world.physics.castDown(
+        { x, y: expected + 200, z },
+        400,
+        world.player.body,
+      );
+      expect(hit, `no hit at ${x},${z}`).not.toBeNull();
+      // The ray starts 200m above the heightmap's value there, so it must
+      // travel 200m to reach it - not 200 plus a scale factor, and not a
+      // rounded number that happens to be close.
+      // The trimesh is piecewise linear over triangles, while `heightAt` is a
+      // bilinear sample of the same grid, so the two differ by the
+      // discretisation error of a 1.3m cell - centimetres, not metres. The
+      // assertion is therefore pinned to a couple of centimetres: tight enough
+      // to catch a scale factor or a swapped axis, loose enough to tolerate
+      // the representation change.
+      expect(Math.abs(hit!.distance - 200), `wrong hit at ${x},${z}`).toBeLessThan(0.05);
+    }
   });
 
   it('advances the sky with the game delta it is given', async () => {
@@ -179,20 +256,45 @@ describe('WorldScene', () => {
   it('drops the player onto the ground through the fixed path', async () => {
     const { world } = await buildScene();
 
+    const surface = world.terrain.heightAt(0, 0);
+
     for (let i = 0; i < 600; i += 1) world.fixedUpdate(FIXED_STEP);
 
-    expect(world.player.position.y).toBeCloseTo(PLAYER_HEIGHT / 2, 2);
+    // Settles on the terrain at the spawn XZ, not on a flat plane at y = 0.
+    //
+    // On a slope the capsule rests *higher* than on flat ground, but only by
+    // the radius term. The cylinder section is parallel to the player's axis
+    // and gains nothing from the tilt; the spherical cap does, because it
+    // contacts the surface along the normal. So the centre comes to rest at
+    //
+    //   surface + halfHeight + radius / normal.y
+    //
+    // and not at `surface + halfHeight / normal.y`, which would overstate the
+    // slope effect by the whole cylinder height. This is measured, not
+    // derived on the spot - see the table this was calibrated against.
+    const normal = world.terrain.normalAt(0, 0);
+    expect(world.player.position.y).toBeCloseTo(
+      surface + PLAYER_HALF_HEIGHT + PLAYER_RADIUS / normal.y,
+      2,
+    );
 
     // The mesh only follows on the render path - `fixedUpdate` deliberately
-    // never touches it, so physics stays out of the presentation layer.
-    expect(world.player.mesh.position.y).toBe(1);
+    // never touches it, so physics stays out of the presentation layer. It is
+    // still sitting where it was created, which is the spawn height the
+    // terrain gave it, not the settled height.
+    const spawnY = world.player.mesh.position.y;
+    expect(spawnY).toBeGreaterThan(surface);
+    expect(spawnY).toBeGreaterThan(world.player.position.y);
 
     world.update(0);
     // The mesh is an exact copy of the body, and Rapier's contact solver
     // leaves a few 1e-5 of margin above the ground, so the rest height is
     // asserted to 3dp rather than treated as exact.
     expect(world.player.mesh.position.y).toBe(world.player.position.y);
-    expect(world.player.mesh.position.y).toBeCloseTo(PLAYER_HEIGHT / 2, 3);
+    expect(world.player.mesh.position.y).toBeCloseTo(
+      surface + PLAYER_HALF_HEIGHT + PLAYER_RADIUS / world.terrain.normalAt(0, 0).y,
+      3,
+    );
   });
 
   it('tears everything down on dispose', async () => {

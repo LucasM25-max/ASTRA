@@ -88,11 +88,16 @@ src/
 │   ├── SceneManager.ts            Macro state machine
 │   └── TimeController.ts          Game time, dilation and pause
 ├── debug/
-│   ├── DebugGizmos.ts             Ground grid + origin axis tripod
+│   ├── DebugGizmos.ts             Terrain-spanning measurement grid + origin axes
 │   ├── DebugHud.ts                The DOM panel: FPS, frame time, counters
 │   └── DebugOverlay.ts            Orchestrator, key bindings, input logging
 ├── physics/
-│   └── PhysicsWorld.ts            Rapier world, gravity, ground + capsule colliders
+│   └── PhysicsWorld.ts            Rapier world, gravity, capsule + terrain colliders
+├── procedural/
+│   ├── NoiseLibrary.ts            Perlin, Simplex, Voronoi, FBM — JS and GLSL
+│   ├── StreamSpline.ts            Catmull-Rom spline with an arc-length LUT
+│   ├── TerrainGenerator.ts        384×384 heightmap, biomes, mesh + collider data
+│   └── MaterialFactory.ts         Triplanar terrain material (no texture files)
 ├── player/
 │   ├── Player.ts                  Capsule mesh + dynamic body, synced per frame
 │   └── MovementController.ts      WASD, walk/run, jump, slopes, camera-relative
@@ -102,7 +107,7 @@ src/
 │   ├── LightingSystem.ts          Sun + ambient fill
 │   └── SkySystem.ts               Gradient sky dome
 └── world/
-    ├── Terrain.ts                 The ground plane
+    ├── Terrain.ts                 Façade over the heightmap + its collider
     └── WorldScene.ts              Composes terrain + sky + lights + fog + player
 ```
 
@@ -235,9 +240,17 @@ __ASTRA__.physics.stepCount            // fixed steps taken so far
 - **Boot is async.** Rapier's WASM must be initialised before a `World` can
   exist, so `main.ts` exports a `ready` promise that tests await. `index.html`
   needs no change — the module auto-starts.
-- 351 tests across 19 files, including a jsdom integration test that runs the
+- 508 tests across 23 files, including a jsdom integration test that runs the
   real `main.ts` bootstrap end to end and walks, runs, jumps, orbits and dilates
   through it.
+- **The terrain collider is a triangle mesh, not a Rapier heightfield.**
+  `ColliderDesc.heightfield()` panics with `RuntimeError: unreachable` in
+  `rawshape_heightfield` on every published `rapier3d-compat` version (verified
+  across 0.11 through 0.22, both `.mjs` and `.cjs`), for raw and normalized
+  heights and grids as small as 4×4. The panic is inside Rust, not in the
+  argument marshalling. See [rapier.rs#146](https://github.com/dimforge/rapier.rs/issues/146),
+  open since 2025-11-17 in a repository that is now archived. The trimesh route
+  is permanent; `createTerrainCollider` documents the evidence at the call site.
 
 ---
 

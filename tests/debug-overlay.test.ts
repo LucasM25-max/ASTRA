@@ -245,8 +245,9 @@ describe('DebugGizmos', () => {
 
     expect(gizmos.gridSize).toBe(TERRAIN_SIZE);
     expect(gizmos.gridDivisions).toBe(DEFAULT_GRID_DIVISIONS);
-    // 100m over 50 divisions is a 2m cell - the coarsest grid that still reads
-    // as a measurement rather than as texture.
+    // 500m over 250 divisions is a 2m cell - the coarsest grid that still
+    // reads as a measurement rather than as texture. Both numbers track the
+    // terrain, so the grid keeps covering exactly the playable area.
     expect(gizmos.gridSize / gizmos.gridDivisions).toBe(2);
     expect(gizmos.grid).toBeInstanceOf(LineSegments);
     gizmos.dispose();
@@ -255,9 +256,14 @@ describe('DebugGizmos', () => {
   it('lifts the grid clear of the ground so it cannot z-fight', () => {
     const gizmos = new DebugGizmos();
 
-    // The terrain's top face sits exactly on y = 0. A grid at y = 0 is coplanar
-    // with it and flickers; anything from a millimetre to a few centimetres
-    // clears the depth buffer without visibly floating.
+    // A grid drawn exactly at a reference height is coplanar with whatever
+    // surface sits there and flickers; anything from a millimetre to a few
+    // centimetres clears the depth buffer without visibly floating.
+    //
+    // The terrain is a heightmap now, so the grid is a measurement overlay at
+    // a fixed reference height rather than a surface drawn on the ground. It
+    // will intersect hills - that is the point of a measurement grid, and it
+    // is off by default.
     expect(gizmos.grid.position.y).toBe(GRID_HEIGHT);
     expect(GRID_HEIGHT).toBeGreaterThan(0);
     expect(GRID_HEIGHT).toBeLessThan(0.05);

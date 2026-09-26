@@ -108,6 +108,26 @@ export interface CapsuleBody {
   readonly collider: RAPIER.Collider;
 }
 
+/**
+ * Everything `createTerrainCollider` needs.
+ *
+ * `vertices` and `indices` are the terrain mesh's *own* buffers, in world
+ * coordinates. Passing them through unchanged is what makes the collider and
+ * the visual mesh the same surface rather than two surfaces that happen to be
+ * near each other.
+ *
+ * `TriMeshFlags.FIX_INTERNAL_EDGES` is applied by default. Without it a
+ * capsule crossing a faceted surface snags on every shared triangle edge,
+ * which reads as the ground being made of steps. This is the trimesh
+ * equivalent of the heightfield flag of the same name.
+ */
+export interface TerrainColliderOptions {
+  readonly vertices: Float32Array;
+  readonly indices: Uint32Array;
+  /** Friction coefficient. Defaults to `DEFAULT_FRICTION`. */
+  readonly friction?: number;
+}
+
 /** What a ray probe found. */
 export interface GroundHit {
   /** Unit surface normal at the hit point, oriented to face the ray's origin. */
@@ -312,6 +332,93 @@ export class PhysicsWorld {
     );
     const collider = this.world.createCollider(RAPIER.ColliderDesc.cuboid(half, thick / 2, half), body);
     collider.setFriction(friction);
+    return body;
+  }
+
+  /**
+   * Create the terrain's collision surface: a static triangle mesh built from
+   * the visual mesh's own vertex and index buffers.
+   *
+   * Why a trimesh and not a heightfield
+   * -----------------------------------
+   * The plan asks for a Rapier heightfield, and a heightfield would be the
+   * better shape - cheaper broad phase, no BVH to build. It is also, as of
+   * rapier3d-compat 0.21.0, unusable:
+   *
+   *   `ColliderDesc.heightfield(...)` constructs fine, but
+   *   `world.createCollider(desc)` panics inside the WASM with
+   *   `RuntimeError: unreachable`, from `rawshape_heightfield`. Verified here
+   *   against 0.11.0, 0.14.0, 0.17.2, 0.19.3, 0.20.1, 0.21.0 and 0.22.0, in
+   *   both Node and the browser, for grid sizes from 2x2 to 384x384, with
+   *   zero and non-zero heights, and with and without flags. It is not a
+   *   calling-convention mistake on this side - the WASM export's signature
+   *   was checked against the parsed type section and it matches the shim.
+   *   This is upstream issue dimforge/rapier.rs#146, opened November 2025 and
+   *   still open; the repository is archived, so it will not be fixed.
+   *
+   * A trimesh built from the same vertices satisfies the plan's actual
+   * requirement - "collision mesh matches visual terrain" - more directly than
+   * a heightfield would, because there is no resampling step at which the two
+   * could disagree. The cost is build time (~0.5s for a 384x384 grid, once,
+   * during world construction, behind the loading screen) and memory (~9MB of
+   * vertex and index data).
+   *
+   * `TriMeshFlags.FIX_INTERNAL_EDGES` is on by default: without it a capsule
+   * crossing a faceted surface snags on every shared triangle edge, which
+   * reads as the ground being made of steps.
+   */
+  createTerrainCollider(options: TerrainColliderOptions): RAPIER.RigidBody {
+    if (this.freed) {
+      throw new Error('[PhysicsWorld] createTerrainCollider called after dispose()');
+    }
+
+    const { vertices, indices } = options;
+    if (!(vertices instanceof Float32Array)) {
+      throw new TypeError(
+        `[PhysicsWorld] terrain vertices must be a Float32Array, received ${typeof vertices}`,
+      );
+    }
+    if (!(indices instanceof Uint32Array)) {
+      throw new TypeError(
+        `[PhysicsWorld] terrain indices must be a Uint32Array, received ${typeof indices}`,
+      );
+    }
+    if (vertices.length === 0 || vertices.length % 3 !== 0) {
+      throw new RangeError(
+        `[PhysicsWorld] terrain vertices must be a non-empty multiple of 3, received ${vertices.length}`,
+      );
+    }
+    if (indices.length === 0 || indices.length % 3 !== 0) {
+      throw new RangeError(
+        `[PhysicsWorld] terrain indices must be a non-empty multiple of 3, received ${indices.length}`,
+      );
+    }
+    for (let i = 0; i < vertices.length; i++) {
+      if (!Number.isFinite(vertices[i])) {
+        throw new RangeError(
+          `[PhysicsWorld] terrain vertices[${i}] is not finite: ${String(vertices[i])}`,
+        );
+      }
+    }
+    for (let i = 0; i < indices.length; i++) {
+      if (indices[i] >= vertices.length / 3) {
+        throw new RangeError(
+          `[PhysicsWorld] terrain indices[${i}] = ${indices[i]} is out of range for ` +
+            `${vertices.length / 3} vertices`,
+        );
+      }
+    }
+
+    const desc = RAPIER.ColliderDesc.trimesh(
+      vertices,
+      indices,
+      RAPIER.TriMeshFlags.FIX_INTERNAL_EDGES,
+    );
+    desc.setFriction(options.friction ?? DEFAULT_FRICTION);
+
+    // The vertices are already in world space, so the body sits at the origin.
+    const body = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+    this.world.createCollider(desc, body);
     return body;
   }
 

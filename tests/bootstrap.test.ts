@@ -14,6 +14,7 @@ import type { Mock } from 'vitest';
 import { Box3, Frustum, Matrix4, Vector3 } from 'three';
 import { SceneState } from '../src/core/SceneManager';
 import { TimeState } from '../src/core/TimeController';
+import { PLAYER_HEIGHT } from '../src/player/Player';
 
 vi.mock('../src/renderer/RenderPipeline', async (importOriginal) => {
   // A real Scene, because WorldScene populates it for real.
@@ -109,7 +110,7 @@ describe('bootstrap (src/main.ts)', () => {
 
     // Step 1.2: the world is built and attached to the renderer's scene.
     expect(handle?.worldScene.isDisposed).toBe(false);
-    expect(handle?.worldScene.terrain.sizeMetres).toBe(100);
+    expect(handle?.worldScene.terrain.sizeMetres).toBe(500);
     expect(handle?.worldScene.fog).not.toBeNull();
     expect(handle?.renderPipeline.scene.children).toContain(handle?.worldScene.sky.mesh);
   });
@@ -227,7 +228,18 @@ describe('bootstrap physics (Step 1.3)', () => {
     if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
 
     expect(handle.renderPipeline.scene.children).toContain(handle.worldScene.player.mesh);
-    expect(handle.worldScene.player.position).toEqual({ x: 0, y: 1, z: 0 });
+
+    // The spawn XZ comes from the spec; the height is derived from the terrain
+    // so the capsule never starts buried in a hill.
+    expect(handle.worldScene.player.position.x).toBe(0);
+    expect(handle.worldScene.player.position.z).toBe(0);
+
+    const surface = handle.worldScene.terrain.heightAt(0, 0);
+    expect(handle.worldScene.player.position.y).toBeCloseTo(
+      surface + PLAYER_HEIGHT / 2 + 0.05,
+      5,
+    );
+    expect(handle.worldScene.player.position.y).toBeGreaterThan(surface);
   });
 
   it('frames the player in the default camera, so the capsule is on screen', async () => {

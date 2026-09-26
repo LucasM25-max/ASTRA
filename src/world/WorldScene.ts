@@ -37,17 +37,23 @@
 import { Fog, type Scene } from 'three';
 import { LightingSystem } from '../renderer/LightingSystem';
 import { SkySystem, DEFAULT_HORIZON_COLOR } from '../renderer/SkySystem';
-import { DEFAULT_GROUND_THICKNESS, type PhysicsWorld, type Vec3 } from '../physics/PhysicsWorld';
-import { Player, PLAYER_SPAWN } from '../player/Player';
+import type { PhysicsWorld, Vec3 } from '../physics/PhysicsWorld';
+import { Player, PLAYER_HEIGHT, PLAYER_SPAWN } from '../player/Player';
 import { Terrain } from './Terrain';
+import type { StreamSpline } from '../procedural/StreamSpline';
 
 /**
- * Fog distances tuned for a 100m plane viewed from ~8m out: the near edge of
- * the ground sits at 42m and the far edge at 58m, so the plane dissolves into
- * the haze instead of ending in a hard line against the sky.
+ * Fog distances tuned for a 500m terrain viewed from ~8m out.
+ *
+ * The old 25-60m band was chosen to dissolve the edge of a 100m plane. Kept
+ * at that scale against a 500m world it would hide the entire terrain - the
+ * rolling hills and the carved valley would never be visible, which would make
+ * most of Step 2.1 invisible. 80-400m shows the hills and the valley clearly
+ * while still dissolving the terrain's far edge into the haze, and Step 2.5
+ * replaces this linear fog with volumetric ground fog in the stream valley.
  */
-export const DEFAULT_FOG_NEAR = 25;
-export const DEFAULT_FOG_FAR = 60;
+export const DEFAULT_FOG_NEAR = 80;
+export const DEFAULT_FOG_FAR = 400;
 
 /** A touch cooler than the horizon colour, so haze reads as air not fog. */
 export const DEFAULT_FOG_COLOR = 0xdfe8ee;
@@ -68,6 +74,23 @@ export interface WorldSceneOptions {
   playerRadius?: number;
   /** Total capsule height in metres. Defaults to `PLAYER_HEIGHT`. */
   playerHeight?: number;
+  /**
+   * Terrain generation parameters. Defaults to the standard 500m world.
+   * Passed straight through to `Terrain`, so a smaller `resolution` is the
+   * cheap way to build a test world.
+   */
+  terrain?: {
+    /** Side length in metres. */
+    size?: number;
+    /** Vertices per side. */
+    resolution?: number;
+    /** World seed. */
+    seed?: number;
+    /** Octaves of fbm for the rolling hills. */
+    octaves?: number;
+    /** The stream path the valley is carved along. */
+    spline?: StreamSpline;
+  };
 }
 
 export class WorldScene {
@@ -90,12 +113,30 @@ export class WorldScene {
     const fogNear = options.fog?.near ?? DEFAULT_FOG_NEAR;
     const fogFar = options.fog?.far ?? DEFAULT_FOG_FAR;
 
-    this.terrain = new Terrain();
+    this.terrain = new Terrain({
+      size: options.terrain?.size,
+      resolution: options.terrain?.resolution,
+      seed: options.terrain?.seed,
+      octaves: options.terrain?.octaves,
+      spline: options.terrain?.spline,
+    });
     this.sky = new SkySystem({ horizonColor: DEFAULT_HORIZON_COLOR });
     this.lighting = new LightingSystem();
+
+    // Spawn on the surface, not at a fixed height. On a heightmap a fixed
+    // spawn puts the player inside a hill about half the time, and Rapier's
+    // resolution of that is a shove in an arbitrary direction - which reads as
+    // a bug rather than as terrain.
+    const spawnXZ = options.playerSpawn ?? PLAYER_SPAWN;
+    const spawn = this.terrain.restHeight(
+      spawnXZ.x,
+      spawnXZ.z,
+      options.playerHeight ?? PLAYER_HEIGHT,
+    );
+
     this.player = new Player({
       physics: this.physics,
-      spawn: options.playerSpawn ?? PLAYER_SPAWN,
+      spawn,
       radius: options.playerRadius,
       height: options.playerHeight,
     });
@@ -105,13 +146,11 @@ export class WorldScene {
     this.lighting.addTo(this.scene);
     this.player.addTo(this.scene);
 
-    // Static collision for the ground. The slab's top face sits exactly on
-    // y = 0, level with the visual plane, so what the player sees and what the
-    // player stands on are the same surface.
-    this.physics.createGround(
-      this.terrain.sizeMetres / 2,
-      DEFAULT_GROUND_THICKNESS,
-    );
+    // Static collision for the ground, built from the terrain mesh's own
+    // vertex and index buffers. Using the same numbers as the visual mesh is
+    // what makes what the player sees and what the player stands on the same
+    // surface - there is no second heightmap to drift out of sync.
+    this.physics.createTerrainCollider(this.terrain.collisionData());
 
     // Linear fog: the cheapest depth cue that works, and the one Step 2.5
     // replaces with volumetric ground fog in the stream valley.
