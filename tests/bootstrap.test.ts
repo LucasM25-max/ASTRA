@@ -577,6 +577,110 @@ describe('bootstrap movement (Step 1.4)', () => {
     expect(Math.abs(handle.worldScene.player.position.x - start.x)).toBeLessThan(0.5);
   });
 
+  // The three tests below drive hundreds of animation frames through the real
+  // loop, which in jsdom means hundreds of ~16ms timer ticks. They are given
+  // room accordingly; the suite as a whole is still seconds, not minutes.
+
+  it('runs at 6 m/s while Shift is held through the booted engine loop', async () => {
+    await bootApp();
+    for (let i = 0; i < 12; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    // Ground acceleration is 24 m/s^2, so the speed cap is reached in about nine
+    // fixed steps - thirty frames is comfortably past the ramp.
+    const measure = async (shift: boolean): Promise<number> => {
+      if (shift) {
+        window.dispatchEvent(new KeyboardEvent('keydown', { code: 'ShiftLeft', key: 'Shift' }));
+      }
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW', key: 'w' }));
+      for (let i = 0; i < 30; i += 1) await nextFrame();
+      const speed = handle.movement.horizontalSpeed;
+
+      window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW', key: 'w' }));
+      if (shift) {
+        window.dispatchEvent(new KeyboardEvent('keyup', { code: 'ShiftLeft', key: 'Shift' }));
+      }
+      // Back to rest, so the next measurement starts from standing.
+      for (let i = 0; i < 30; i += 1) await nextFrame();
+      return speed;
+    };
+
+    const walk = await measure(false);
+    const run = await measure(true);
+
+    expect(walk).toBeCloseTo(3.5, 1);
+    expect(run).toBeCloseTo(6, 1);
+  }, 20000);
+
+  it('jumps with Space and lands again through the booted engine loop', async () => {
+    await bootApp();
+    for (let i = 0; i < 24; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    expect(handle.movement.isGrounded).toBe(true);
+    const rest = handle.worldScene.player.position.y;
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space', key: ' ' }));
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: 'Space', key: ' ' }));
+
+    // Airborne on the very next frame, and already off the ground.
+    await nextFrame();
+    expect(handle.movement.isGrounded).toBe(false);
+    expect(handle.worldScene.player.position.y).toBeGreaterThan(rest);
+
+    // A 5 m/s jump under -9.81 m/s^2 apexes at v^2/2g = 1.27m and is airborne
+    // for just over a second - about 62 fixed steps.
+    let apex = 0;
+    for (let i = 0; i < 80; i += 1) {
+      await nextFrame();
+      apex = Math.max(apex, handle.worldScene.player.position.y - rest);
+    }
+    expect(apex).toBeGreaterThan(1.2);
+    expect(apex).toBeLessThan(1.4);
+
+    // And it lands, rather than staying stuck in the air.
+    for (let i = 0; i < 30; i += 1) await nextFrame();
+    expect(handle.movement.isGrounded).toBe(true);
+    expect(handle.worldScene.player.position.y).toBeCloseTo(rest, 2);
+  }, 20000);
+
+  it('slows the player while game time is dilated, through the booted loop', async () => {
+    await bootApp();
+    for (let i = 0; i < 12; i += 1) await nextFrame();
+
+    const handle = window.__ASTRA__;
+    if (handle === undefined) throw new Error('bootstrap did not expose a debug handle');
+
+    // Distance is measured only once the player is already at the speed cap,
+    // so the acceleration ramp does not distort the ratio.
+    const travelAtPlateau = async (): Promise<number> => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW', key: 'w' }));
+      for (let i = 0; i < 60; i += 1) await nextFrame();
+      const from = { ...handle.worldScene.player.position };
+      for (let i = 0; i < 60; i += 1) await nextFrame();
+      const to = { ...handle.worldScene.player.position };
+      window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW', key: 'w' }));
+      for (let i = 0; i < 40; i += 1) await nextFrame();
+      return Math.hypot(to.x - from.x, to.z - from.z);
+    };
+
+    const full = await travelAtPlateau();
+    handle.timeController.setState(TimeState.DILATED, 0);
+    const dilated = await travelAtPlateau();
+    handle.timeController.setState(TimeState.REALTIME, 0);
+
+    // The controller multiplies nothing by gameSpeed: the engine simply issues a
+    // quarter of the fixed steps, so a quarter of the distance is covered. That
+    // is the whole mechanism, and it is what makes dilation automatic.
+    expect(dilated).toBeGreaterThan(0);
+    expect(dilated / full).toBeGreaterThan(0.2);
+    expect(dilated / full).toBeLessThan(0.3);
+  }, 25000);
+
   it('does not move the player while the scene is paused', async () => {
     await bootApp();
     for (let i = 0; i < 24; i += 1) await nextFrame();

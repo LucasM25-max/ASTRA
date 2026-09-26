@@ -87,12 +87,18 @@ src/
 │   ├── InputManager.ts            Keyboard + mouse capture
 │   ├── SceneManager.ts            Macro state machine
 │   └── TimeController.ts          Game time, dilation and pause
+├── debug/
+│   ├── DebugGizmos.ts             Ground grid + origin axis tripod
+│   ├── DebugHud.ts                The DOM panel: FPS, frame time, counters
+│   └── DebugOverlay.ts            Orchestrator, key bindings, input logging
 ├── physics/
 │   └── PhysicsWorld.ts            Rapier world, gravity, ground + capsule colliders
 ├── player/
-│   └── Player.ts                  Capsule mesh + dynamic body, synced per frame
+│   ├── Player.ts                  Capsule mesh + dynamic body, synced per frame
+│   └── MovementController.ts      WASD, walk/run, jump, slopes, camera-relative
 ├── renderer/
 │   ├── RenderPipeline.ts          WebGLRenderer, scene graph, camera, resizing
+│   ├── CameraController.ts        Third-person orbit camera (owns no Three objects)
 │   ├── LightingSystem.ts          Sun + ambient fill
 │   └── SkySystem.ts               Gradient sky dome
 └── world/
@@ -153,9 +159,12 @@ keeps running at full frame rate. Speed transitions are interpolated over
 slowing the game would also slow the ramp, and a paused game could never speed
 back up.
 
-The camera and the UI are deliberately exempt: they keep running at full speed so
-the player can still look around freely during slowed time, which is what makes
-Active Encounter combat readable.
+The camera, the debug overlay and the UI are deliberately exempt: they keep
+running at full speed so the player can still look around freely during slowed
+time, which is what makes Active Encounter combat readable. In `main.ts` the
+camera and the overlay are driven from `Engine.onRender` with `frame.realDelta`
+while the world takes `TimeController.getDelta()` - the two deltas sit side by
+side in one callback, and the difference between them is the whole point.
 
 ### Events
 
@@ -226,8 +235,9 @@ __ASTRA__.physics.stepCount            // fixed steps taken so far
 - **Boot is async.** Rapier's WASM must be initialised before a `World` can
   exist, so `main.ts` exports a `ready` promise that tests await. `index.html`
   needs no change — the module auto-starts.
-- 348 tests across 19 files, including a jsdom integration test that runs the
-  real `main.ts` bootstrap end to end.
+- 351 tests across 19 files, including a jsdom integration test that runs the
+  real `main.ts` bootstrap end to end and walks, runs, jumps, orbits and dilates
+  through it.
 
 ---
 
