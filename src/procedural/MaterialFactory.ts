@@ -79,6 +79,22 @@ export interface TerrainMaterialOptions {
   normalOctaves?: number;
   /** World seed for the shader's noise, so it matches the generated terrain. */
   noiseSeed?: number;
+  /**
+   * Strength of the fungal overlay, read from the `corruption` vertex
+   * attribute. Zero disables it entirely, and the patch injects nothing - so
+   * a caller that does not want corruption pays nothing for it.
+   */
+  corruptionStrength?: number;
+  /**
+   * Scale of the fungal blotches, in noise units per metre.
+   *
+   * Deliberately much larger than `detailScale`: the overlay is a broad stain
+   * across the bank, not grain. At terrain detail scale it would read as moss
+   * rather than as rot.
+   */
+  corruptionScale?: number;
+  /** How far the overlay darkens the ground, 0 to 1. */
+  corruptionDarken?: number;
   /** Roughness of the finished surface. */
   roughness?: number;
   /** Metalness. Zero: terrain is not metal. */
@@ -95,6 +111,9 @@ export const DEFAULT_TERRAIN_MATERIAL_OPTIONS = {
   normalStrength: 0.55,
   normalOctaves: 3,
   noiseSeed: 0,
+  corruptionStrength: 1,
+  corruptionScale: 0.055,
+  corruptionDarken: 0.45,
   roughness: 0.94,
   metalness: 0,
 } as const;
@@ -128,7 +147,14 @@ export function createTerrainMaterial(options: TerrainMaterialOptions = {}): Mes
   material.onBeforeCompile = (shader) => {
     patchTerrainShader(shader, o);
   };
-  material.customProgramCacheKey = () => TERRAIN_PROGRAM_KEY;
+  // The key has to carry the corruption flag, not just the version. The patch
+  // injects a different program when corruption is on - a varying, three
+  // uniforms and a second injection point - and a fixed key would let Three
+  // hand the corrupted material a program compiled for the clean one, or the
+  // other way round. The failure is a terrain with a shader that reads a
+  // `corruption` attribute the geometry does not have, which draws as black.
+  material.customProgramCacheKey = () =>
+    o.corruptionStrength > 0 ? `${TERRAIN_PROGRAM_KEY}-corrupt` : TERRAIN_PROGRAM_KEY;
 
   return material;
 }
@@ -160,6 +186,11 @@ export function patchTerrainShader(
   shader.uniforms.uNormalStrength = { value: options.normalStrength };
   shader.uniforms.uNormalOctaves = { value: options.normalOctaves };
   shader.uniforms.uNoiseSeed = { value: options.noiseSeed };
+  if (options.corruptionStrength > 0) {
+    shader.uniforms.uCorruptionStrength = { value: options.corruptionStrength };
+    shader.uniforms.uCorruptionScale = { value: options.corruptionScale };
+    shader.uniforms.uCorruptionDarken = { value: options.corruptionDarken };
+  }
 
   /* ---------------------------------------------------------------- vertex */
 
@@ -168,9 +199,11 @@ export function patchTerrainShader(
     /* glsl */ `
       #include <common>
       attribute vec4 biome;
+      ${options.corruptionStrength > 0 ? 'attribute float corruption;' : ''}
       varying vec4 vAstraBiome;
       varying vec3 vAstraWorld;
       varying vec3 vAstraNormal;
+      ${options.corruptionStrength > 0 ? 'varying float vAstraCorruption;' : ''}
     `,
   );
 
@@ -183,6 +216,7 @@ export function patchTerrainShader(
       #include <begin_vertex>
       vAstraWorld = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;
       vAstraBiome = biome;
+      ${options.corruptionStrength > 0 ? 'vAstraCorruption = corruption;' : ''}
     `,
   );
 
@@ -206,6 +240,7 @@ export function patchTerrainShader(
       varying vec4 vAstraBiome;
       varying vec3 vAstraWorld;
       varying vec3 vAstraNormal;
+      ${options.corruptionStrength > 0 ? 'varying float vAstraCorruption;\n      uniform float uCorruptionStrength;\n      uniform float uCorruptionScale;\n      uniform float uCorruptionDarken;' : ''}
       uniform float uDetailScale;
       uniform float uColorVariation;
       uniform float uSlopeRockStart;
@@ -221,6 +256,33 @@ export function patchTerrainShader(
       // surface can face and blend by how strongly it faces each. Because the
       // lookup is in world space there is no UV, and therefore no UV seam -
       // which is the entire reason for doing it this way.
+      // How much of this fragment the fungal overlay covers, 0 to 1.
+      //
+      // A function rather than inline code because it is read twice: once at
+      // <map_fragment> for the colour and once at <roughnessmap_fragment> for
+      // the roughness, and two copies of the noise maths is two places for
+      // them to drift apart. It has to be a free function and not a varying,
+      // because the crust term is a function of world position and a varying
+      // would need the weight computed in the vertex shader, where the
+      // fragment-resolution stain would be lost.
+      ${options.corruptionStrength > 0 ? `float astraCorruptionWeight( vec3 worldPos, float c ) {
+        // The stain only takes hold where the corruption already is, and its
+        // own noise decides how much of that ground it covers. Without the
+        // second term the overlay would be a flat tint with a hard boundary
+        // at the corruption field's edge.
+        float stain = astraFbm2D(
+          worldPos.xz * uCorruptionScale, uNoiseSeed + 31.7, 3, 2.0, 0.5, false
+        ) * 0.5 + 0.5;
+        float crust = 1.0 - abs(
+          astraFbm2D( worldPos.xz * uCorruptionScale * 2.3, uNoiseSeed + 44.1, 2, 2.0, 0.5, true )
+        );
+        // The crust term is ridged rather than plain fbm, so the edge of the
+        // stain is crusty rather than feathered. A soft edge reads as a
+        // painted-on decal.
+        float cover = smoothstep( 0.35, 0.75, stain * 0.7 + crust * 0.3 );
+        return clamp( c, 0.0, 1.0 ) * uCorruptionStrength * cover;
+      }` : ''}
+
       float astraTriplanarDetail( vec3 worldPos, float scale, float seed, int octaves ) {
         vec3 q = worldPos * scale;
         vec3 w = pow( abs( vAstraNormal ), vec3( 3.0 ) );
@@ -267,8 +329,66 @@ export function patchTerrainShader(
 
         diffuseColor.rgb *= ( 1.0 + clamp( detail, -1.0, 1.0 ) * uColorVariation );
       }
+
+      ${
+        options.corruptionStrength > 0
+          ? `{
+        // The fungal overlay: the plan's "fungal texture overlay via shader
+        // uniform" on the terrain near the stream.
+        //
+        // The weight's base is the vertex's own corruption, interpolated
+        // across the face - so the stain has the shape of the corruption
+        // field and not the shape of the mesh's triangulation. Evaluating it
+        // per fragment from world position would need the spline walked in
+        // the fragment shader, which is the whole reason it is baked per
+        // vertex.
+        float weight = astraCorruptionWeight( vAstraWorld, vAstraCorruption );
+        if ( weight > 0.001 ) {
+          // Sickly green-grey, the same family the fungus materials use, so
+          // the ground and the things growing out of it are the same rot.
+          float stain = astraFbm2D(
+            vAstraWorld.xz * uCorruptionScale, uNoiseSeed + 31.7, 3, 2.0, 0.5, false
+          ) * 0.5 + 0.5;
+          vec3 sickly = vec3( 0.30, 0.34, 0.20 );
+          vec3 bruised = vec3( 0.28, 0.20, 0.28 );
+          vec3 rot = mix( sickly, bruised, clamp( stain * 1.4 - 0.2, 0.0, 1.0 ) );
+
+          // Mixed toward the rot colour AND darkened, because a stain that
+          // only shifts the hue still looks like clean ground that has been
+          // tinted. The darkening is what reads as dead.
+          diffuseColor.rgb = mix( diffuseColor.rgb, rot, weight * 0.8 );
+          diffuseColor.rgb *= 1.0 - weight * uCorruptionDarken;
+        }
+      }`
+          : ''
+      }
     `,
   );
+
+  // Rougher where the ground is rotten.
+  //
+  // This goes at `<roughnessmap_fragment>` and not at `<map_fragment>`, which
+  // is where the colour above lives: `roughnessFactor` is declared by the
+  // roughness chunk and does not exist yet when `<map_fragment>` runs. Reading
+  // it earlier is a compile error, and the failure is a terrain that draws
+  // black with no warning anywhere upstream.
+  if (options.corruptionStrength > 0) {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <roughnessmap_fragment>',
+      /* glsl */ `
+        #include <roughnessmap_fragment>
+
+        {
+          // Wet rot catches a highlight and dry rot does not, so the stain
+          // has to change the roughness as well as the colour. A uniform
+          // roughness across it is the tell that it is a texture rather than
+          // a surface.
+          float weight = astraCorruptionWeight( vAstraWorld, vAstraCorruption );
+          roughnessFactor = clamp( roughnessFactor + weight * 0.25, 0.0, 1.0 );
+        }
+      `,
+    );
+  }
 
   // Perturb the normal. `<normal_fragment_maps>` is the chunk Three reserves
   // for exactly this, and in a material with no normal maps it expands to

@@ -45,6 +45,11 @@ import { BufferAttribute, BufferGeometry, Float32BufferAttribute, Matrix4, Plane
 import { PerlinNoise2D, SimplexNoise2D, fbm2D, ridged2D, voronoiF1Normalized } from './NoiseLibrary';
 import { StreamSpline } from './StreamSpline';
 import { BANK_MARGIN, BANK_PLATEAU, BANK_RISE, StreamProfile } from './StreamGenerator';
+import {
+  corruptionIntensity,
+  pollutionAlongStream,
+  DEFAULT_POLLUTION_ZONES,
+} from './CorruptionField';
 
 /** Side length of the terrain, in metres. From the plan: 500m x 500m. */
 export const TERRAIN_SIZE = 500;
@@ -215,6 +220,26 @@ export interface TerrainGeneratorOptions {
     width?: number;
     widthVariation?: number;
   };
+  /**
+   * Corruption field overrides.
+   *
+   * Defaults to the same curve `CorruptionField` ships with, which is what
+   * keeps the ground, the trees and the fungus all answering the same question.
+   * A caller who wants a different reach passes it here; a caller who passes
+   * nothing gets the world the rest of Step 2.4 was tuned against.
+   */
+  corruption?: {
+    /** Distance from the centreline at which corruption reaches zero, pollution 0. */
+    reachMin?: number;
+    /** The same reach at pollution 1. */
+    reachMax?: number;
+    /** Exponent applied to pollution before it scales the falloff. */
+    pollutionPower?: number;
+    /** The three stream pollution zones, in order along the spline. */
+    upstream?: number;
+    midstream?: number;
+    downstream?: number;
+  };
 }
 
 /** Everything the terrain produced, in one object. */
@@ -230,6 +255,17 @@ export interface TerrainData {
   readonly columnMajorHeights: Float32Array;
   /** Distance from each vertex to the stream, row-major, metres. */
   readonly distanceToStream: Float32Array;
+  /**
+   * 0..1 corruption at each vertex, row-major.
+   *
+   * The plan's "fungal texture overlay via shader uniform" on the terrain.
+   * Baked per vertex rather than evaluated in the shader, for the same reason
+   * the biome weights are: the corruption is a function of the nearest point
+   * along a Catmull-Rom spline, and doing that per fragment would mean
+   * walking the spline's polyline in the fragment shader. One float per
+   * vertex is 590 kB and a single array read.
+   */
+  readonly corruption: Float32Array;
 
   /** Biome weights per vertex, row-major, 4 floats per vertex. */
   readonly biomeWeights: Float32Array;
@@ -528,7 +564,17 @@ export function generateTerrain(options: TerrainGeneratorOptions = {}): TerrainD
   // One pass for both fields: the arc length is only valid where it belongs to
   // the nearest point, so the two have to be stamped together. See
   // `StreamSpline.nearestField`.
-  const distanceToStream = spline.nearestField(size, resolution).distance;
+  //
+  // The arc length is what turns a distance into a pollution: the nearest
+  // point along the stream is where the water's own filth is measured, and
+  // without it the cave end and the village end would rot identically.
+  const nearest = spline.nearestField(size, resolution, NEAREST_FIELD_INFLUENCE);
+  const distanceToStream = nearest.distance;
+  const corruption = buildCorruption(
+    nearest,
+    spline.length,
+    options.corruption,
+  );
 
   // Sizes the channel so it always matches the water that will sit in it.
   const streamProfile =
@@ -625,6 +671,7 @@ export function generateTerrain(options: TerrainGeneratorOptions = {}): TerrainD
     heights,
     columnMajorHeights,
     distanceToStream,
+    corruption,
     biomeWeights,
     minHeight,
     maxHeight,
@@ -637,6 +684,69 @@ export function generateTerrain(options: TerrainGeneratorOptions = {}): TerrainD
 /* -------------------------------------------------------------------------- */
 /* Biome weights                                                              */
 /* -------------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------- */
+/* Corruption                                                               */
+/* -------------------------------------------------------------------------- */
+
+/** The nearest field `StreamSpline.nearestField` produces. */
+interface NearestFields {
+  distance: Float32Array;
+  arcLength: Float32Array;
+}
+
+/**
+ * The influence `StreamSpline.nearestField` is called with.
+ *
+ * Named at module scope because the corruption build has to recognise the
+ * sentinel the field fills untouched cells with, and a magic 90 two hundred
+ * lines away is not recognisable. It matches the field's own default.
+ */
+const NEAREST_FIELD_INFLUENCE = 90;
+
+/**
+ * Corruption per vertex, from the nearest field the terrain already built.
+ *
+ * The composition is `corruptionIntensity(distance, pollution)` and nothing
+ * else - the same function `CorruptionField` evaluates and the same one the
+ * forest's per-instance value comes from. Three consumers, one curve, which is
+ * the only way the ground, the bark and the fungus can agree.
+ *
+ * The distance is capped at the field's own influence: beyond it
+ * `StreamSpline.nearestField` reports the influence rather than a real
+ * distance, and reading that as a distance would put a ring of corruption at
+ * the edge of the world where the stream is simply far away.
+ */
+function buildCorruption(
+  nearest: NearestFields,
+  splineLength: number,
+  overrides: TerrainGeneratorOptions['corruption'],
+): Float32Array {
+  const upstream = overrides?.upstream ?? DEFAULT_POLLUTION_ZONES.upstream;
+  const midstream = overrides?.midstream ?? DEFAULT_POLLUTION_ZONES.midstream;
+  const downstream = overrides?.downstream ?? DEFAULT_POLLUTION_ZONES.downstream;
+  // Only the keys that were actually passed. Spreading `{ reachMin: undefined }`
+  // over the defaults would replace 12 with undefined and make the reach NaN -
+  // which is not a thrown error, just a corruption array full of NaN that
+  // reaches the GPU as a black terrain.
+  const curve: Partial<Parameters<typeof corruptionIntensity>[2]> = {};
+  if (overrides?.reachMin !== undefined) curve.reachMin = overrides.reachMin;
+  if (overrides?.reachMax !== undefined) curve.reachMax = overrides.reachMax;
+  if (overrides?.pollutionPower !== undefined) curve.pollutionPower = overrides.pollutionPower;
+
+  const { distance, arcLength } = nearest;
+  const corruption = new Float32Array(distance.length);
+  for (let k = 0; k < corruption.length; k++) {
+    const d = distance[k];
+    // `nearestField` fills untouched cells with its maxInfluence, so a value
+    // at or above it means "nowhere near the stream".
+    if (d >= NEAREST_FIELD_INFLUENCE) continue;
+    const t = splineLength > 0 ? arcLength[k] / splineLength : 0;
+    const pollution = pollutionAlongStream(t, upstream, midstream, downstream);
+    corruption[k] = corruptionIntensity(d, pollution, curve);
+  }
+  return corruption;
+}
 
 interface BiomeContext {
   readonly bankWidth: number;
@@ -854,6 +964,7 @@ export function buildTerrainGeometry(data: TerrainData): BufferGeometry {
 
   const colors = new Float32Array(vertexCount * 3);
   const biome = new Float32Array(vertexCount * 4);
+  const corruption = new Float32Array(vertexCount);
 
   // Linear-space biome colours. `Color.setHex` converts from sRGB, and the
   // `color` attribute is read as linear by Three's standard material, so this
@@ -891,6 +1002,8 @@ export function buildTerrainGeometry(data: TerrainData): BufferGeometry {
     biome[o + 1] = w1;
     biome[o + 2] = w2;
     biome[o + 3] = w3;
+
+    corruption[k] = data.corruption[k];
   }
 
   position.needsUpdate = true;
@@ -901,6 +1014,10 @@ export function buildTerrainGeometry(data: TerrainData): BufferGeometry {
 
   geometry.setAttribute('color', new BufferAttribute(colors, 3));
   geometry.setAttribute('biome', new Float32BufferAttribute(biome, 4));
+  // One float per vertex, interpolated across the face. The material reads it
+  // as the weight of the fungal overlay: the plan's "fungal texture overlay
+  // via shader uniform" on the terrain.
+  geometry.setAttribute('corruption', new Float32BufferAttribute(corruption, 1));
   geometry.computeVertexNormals();
   geometry.computeBoundingSphere();
 
