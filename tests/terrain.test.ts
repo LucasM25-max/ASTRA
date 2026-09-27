@@ -87,7 +87,10 @@ describe('Terrain', () => {
       // terrain must be lit and fogged by the same pipeline as everything else.
       expect(material.vertexColors).toBe(true);
       expect(material.transparent).toBe(false);
-      expect(material.customProgramCacheKey()).toBe('astra-terrain-v1');
+      // Corruption is on by default, and the key has to say so: the corrupted
+      // program reads a `corruption` attribute and declares three extra
+      // uniforms, so a clean-compiled program handed to it draws black.
+      expect(material.customProgramCacheKey()).toBe('astra-terrain-v1-corrupt');
       expect(typeof material.onBeforeCompile).toBe('function');
     });
 

@@ -52,10 +52,25 @@ describe('createTerrainMaterial', () => {
   it('registers a stable program cache key', () => {
     // Without this, Three may reuse a program compiled without the patch and
     // the terrain renders as a flat unlit surface.
-    const material = createTerrainMaterial();
-    expect(material.customProgramCacheKey()).toBe('astra-terrain-v1');
+    //
+    // The key carries the corruption flag as well as the version, because the
+    // patch injects a different program when corruption is on - a varying, three
+    // uniforms and a `corruption` attribute. Sharing one key between the two
+    // lets Three hand the corrupted material a program compiled for the clean
+    // one, and a shader reading a `corruption` attribute the geometry does not
+    // have draws as black. The default has corruption on, so the default key is
+    // the corrupt one.
+    expect(createTerrainMaterial().customProgramCacheKey()).toBe('astra-terrain-v1-corrupt');
     expect(createTerrainMaterial({ roughness: 0.3 }).customProgramCacheKey()).toBe(
+      'astra-terrain-v1-corrupt',
+    );
+    expect(createTerrainMaterial({ corruptionStrength: 0 }).customProgramCacheKey()).toBe(
       'astra-terrain-v1',
+    );
+    // And the key does not depend on anything that only moves a uniform: two
+    // materials that differ in roughness must still share a program.
+    expect(createTerrainMaterial({ corruptionStrength: 0.4 }).customProgramCacheKey()).toBe(
+      'astra-terrain-v1-corrupt',
     );
   });
 

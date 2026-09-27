@@ -4,6 +4,7 @@ import {
   Forest,
   DEFAULT_COLLIDER_RADIUS,
   FOREST_REBUILD_DISTANCE,
+  SHELF_VARIANTS,
   type ForestOptions,
 } from '../src/world/Forest';
 import { PhysicsWorld } from '../src/physics/PhysicsWorld';
@@ -77,9 +78,10 @@ describe('forest construction', () => {
       TREE_TYPES.length * VARIANTS_PER_TYPE * 2 + // near bark and canopy
       TREE_TYPES.length * 2 + // medium bark and canopy
       TREE_TYPES.length + // far billboard
-      FOLIAGE_KINDS.length; // ground cover
+      FOLIAGE_KINDS.length + // ground cover
+      SHELF_VARIANTS; // fungal brackets on corrupted trunks
     expect(all.length).toBe(expected);
-    expect(expected).toBe(50);
+    expect(expected).toBe(53);
 
     for (const mesh of all) {
       expect(mesh.name.length).toBeGreaterThan(0);

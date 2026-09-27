@@ -29,6 +29,9 @@
  *               again as the player walks away. Three thousand colliders would
  *               be three thousand broad-phase entries for trees the player
  *               cannot see.
+ *   shelves    fungal brackets growing out of the trunks the corruption field
+ *               marks, one InstancedMesh per shelf variant, rebuilt with the
+ *               near tier because they are attached to specific tree instances.
  *
  * Why the rebuild is throttled the way it is
  * ------------------------------------------
@@ -79,6 +82,7 @@ import {
 import {
   createBarkMaterial,
   createLeafMaterial,
+  DEFAULT_LEAF_MATERIAL_OPTIONS,
   type SharedFloatUniform,
 } from '../procedural/TreeMaterial';
 import {
@@ -95,6 +99,10 @@ import {
   createFoliageMaterial,
   type FoliageMaterialOptions,
 } from '../procedural/FoliageMaterial';
+import { generateFungalShelf } from '../procedural/FungusGenerator';
+import { createFungusMaterial } from '../procedural/FungusMaterial';
+import { CorruptionField } from '../procedural/CorruptionField';
+import { createRng } from '../procedural/NoiseLibrary';
 import {
   placeTrees,
   tierTrees,
@@ -120,6 +128,66 @@ export const FOLIAGE_REBUILD_DISTANCE = 12;
 /** Trunks within this distance of the camera get a collider, in metres. */
 export const DEFAULT_COLLIDER_RADIUS = 60;
 
+/**
+ * How many shelf geometries exist. Three, not four: the shelf is a bracket, and
+ * at the sizes it is drawn the only thing that distinguishes one from another is
+ * how many layers it has and how far it reaches, which the generator already
+ * randomises within one variant.
+ */
+export const SHELF_VARIANTS = 3;
+
+/**
+ * Shelf instances per variant.
+ *
+ * The near tier holds about a hundred trees, of which the corruption field
+ * marks roughly an eighth at the stream's foul end and none at all at the clean
+ * one. Three shelves on each of those is well under a hundred, so this is a
+ * four-fold margin on the worst case rather than a tight fit.
+ */
+export const SHELF_BUDGET = 128;
+
+/**
+ * Corruption below which a trunk grows nothing.
+ *
+ * Not zero. The field returns small non-zero values a long way out, and a shelf
+ * on a tree forty metres from the water reads as a bug rather than as spread.
+ */
+export const SHELF_MIN_CORRUPTION = 0.18;
+
+/** The most shelves one trunk carries, at full corruption. */
+export const SHELF_MAX_PER_TREE = 3;
+
+/** Height on the trunk the lowest shelf starts at, as a fraction of the tree. */
+const SHELF_LOW = 0.14;
+
+/** Height on the trunk the highest shelf reaches, as a fraction of the tree. */
+const SHELF_HIGH = 0.62;
+
+/**
+ * The azimuth the shelf geometry's arc is centred on, in radians.
+ *
+ * The generator builds a PARTIAL ring: `arcStart` to `arcStart + arcSpan`. The
+ * forest passes this centre in so it can aim the ring outward, because a partial
+ * ring at an arbitrary azimuth can land on the far side of the trunk, where it
+ * is inside the tree and invisible.
+ */
+const SHELF_ARC_CENTRE = 0;
+
+/**
+ * A per-tree, per-shelf hash.
+ *
+ * A function of the placement index rather than of a running generator, so the
+ * same tree grows the same shelves every time it is rebuilt. A generator that
+ * carried on across rebuilds would reshuffle the whole forest's rot every time
+ * the player paced back and forth over a grid line.
+ */
+function shelfHash(treeIndex: number, salt: number): number {
+  let a = (treeIndex | 0) ^ Math.imul(salt | 0, 0x9e3779b1);
+  a = Math.imul(a ^ (a >>> 16), 0x45d9f3b);
+  a = Math.imul(a ^ (a >>> 16), 0x45d9f3b);
+  return (a ^ (a >>> 16)) >>> 0;
+}
+
 /** The world Y axis. Trees lean about a horizontal axis through their base. */
 const WORLD_UP = new Vector3(0, 1, 0);
 
@@ -132,6 +200,15 @@ export interface ForestOptions {
   distanceToStream?: (x: number, z: number) => number;
   /** 0..1 stream pollution. Optional: it drives the dead-tree share. */
   pollutionAt?: (x: number, z: number) => number;
+  /**
+   * 0..1 corruption intensity. Optional: it drives the bark grey-shift, the
+   * canopy droop and the fungal shelves.
+   *
+   * Without it the forest derives one from the spline with the same
+   * `CorruptionField` the terrain bakes its overlay from, so the two agree by
+   * construction rather than by coincidence.
+   */
+  corruptionAt?: (x: number, z: number) => number;
   /** World seed, shared with the terrain so both agree. */
   seed?: number;
   /**
@@ -171,6 +248,7 @@ export interface ForestStats {
   readonly medium: number;
   readonly far: number;
   readonly foliage: number;
+  readonly shelves: number;
   readonly colliders: number;
   readonly drawCalls: number;
   readonly triangles: number;
@@ -212,6 +290,16 @@ export class Forest {
   /** Ground cover, one mesh per kind. */
   private readonly foliage = new Map<FoliageKind, InstancedMesh>();
 
+  /**
+   * Fungal shelves growing out of corrupted trunks, one mesh per variant.
+   *
+   * They live here rather than in the corruption system because they are
+   * attached to a specific tree instance: the shelf's height, azimuth and scale
+   * all come from the tree it grows on, and the tier rebuild is what knows
+   * which trees are currently drawn.
+   */
+  private readonly shelf = new Map<number, InstancedMesh>();
+
   private readonly materials: MeshStandardMaterial[] = [];
   private readonly geometries: BufferGeometry[] = [];
   private readonly textures: DataTexture[] = [];
@@ -219,11 +307,25 @@ export class Forest {
   /** Trunk colliders currently in the world, keyed by placement index. */
   private readonly colliders = new Map<number, RAPIER.Collider>();
 
+  /**
+   * 0..1 corruption intensity at a world position.
+   *
+   * Public because it is the one number the forest and everything growing in it
+   * have to agree on: the corruption system scatters its mushrooms against the
+   * same sampler, and the debug overlay reports it. Two forests answering the
+   * same question differently is exactly the failure this field exists to
+   * prevent.
+   */
+  readonly corruptionAt: (x: number, z: number) => number;
+
   /** The world the foliage scatter samples. Same field the placement used. */
   private readonly foliageField: ForestField;
   private readonly foliageGeometry: FoliageGeometrySet;
   private readonly foliageCounts: Record<FoliageKind, number>;
   private foliageInstances: FoliageInstance[] = [];
+
+  /** Shelves currently drawn, for the overlay. */
+  private shelfCount = 0;
 
   /** Snapped camera cell the tiers were last built for. */
   private lastTierCell = { x: Number.NaN, z: Number.NaN };
@@ -236,6 +338,7 @@ export class Forest {
     medium: 0,
     far: 0,
     foliage: 0,
+    shelves: 0,
     colliders: 0,
     drawCalls: 0,
     triangles: 0,
@@ -257,6 +360,7 @@ export class Forest {
 
     const field = this.buildField(options);
     this.foliageField = field;
+    this.corruptionAt = field.corruptionAt ?? (() => 0);
 
     this.placement = placeTrees({
       seed: options.seed ?? 1,
@@ -267,6 +371,7 @@ export class Forest {
     });
 
     this.buildTreeMeshes(options);
+    this.buildShelfMeshes(options);
     this.foliageGeometry = generateFoliageGeometry(options.seed ?? 1);
     this.buildFoliageMeshes(options);
 
@@ -295,9 +400,19 @@ export class Forest {
     const normalAt = options.normalAt;
     const distanceToStream = options.distanceToStream;
     const pollutionAt = options.pollutionAt;
+    const corruptionAt = options.corruptionAt;
 
     if (!options.spline) {
-      return { heightAt, normalAt, distanceToStream, pollutionAt };
+      return {
+        heightAt,
+        normalAt,
+        distanceToStream,
+        pollutionAt,
+        // Without a spline there is no stream to be corrupted by, so the whole
+        // forest is clean. Returning a constant zero rather than omitting the
+        // sampler keeps every caller free of a branch.
+        corruptionAt: corruptionAt ?? (() => 0),
+      };
     }
 
     const size = options.size ?? 500;
@@ -314,6 +429,12 @@ export class Forest {
       return i * 128 + j;
     };
     const arcLength = spline.length;
+    // The same field the terrain bakes its overlay from. Built here as well
+    // because the forest is constructed before the terrain's own build in
+    // `WorldScene`, and passing the terrain's baked array across would mean
+    // ordering the two constructors around each other for no benefit: the
+    // field is cheap and the two agree to the last decimal.
+    const corruption = new CorruptionField(spline);
 
     return {
       heightAt,
@@ -334,6 +455,7 @@ export class Forest {
           if (t < 0.67) return DEFAULT_POLLUTION_MIDSTREAM;
           return DEFAULT_POLLUTION_DOWNSTREAM;
         }),
+      corruptionAt: corruptionAt ?? ((x, z) => corruption.corruptionAt(x, z)),
     };
   }
 
@@ -343,9 +465,40 @@ export class Forest {
 
   /** Build every tree mesh and material, once. */
   private buildTreeMeshes(options: ForestOptions): void {
-    const barkMaterial = createBarkMaterial({ windUniform: this.windUniform, ...options.bark });
-    const leafMaterial = createLeafMaterial({ windUniform: this.windUniform, ...options.leaf });
-    this.materials.push(barkMaterial, leafMaterial);
+    // ONE bark material for the whole forest, and one leaf material per TYPE.
+    //
+    // The bark needs nothing per type: its colour is the vertex colour, and the
+    // corruption shift is driven by a per-instance attribute, so one material
+    // serves every trunk at once.
+    //
+    // The leaf material is per type because the droop is scaled by the tree's
+    // own height. A single material would need one number for a 10 m oak and a
+    // 3 m sapling, and whichever it picked would be wrong for the other.
+    //
+    // Neither is per VARIANT, which is the tempting mistake: the near tier has
+    // four variant meshes per type, and giving each its own material would be
+    // thirty-two uniform sets where four do. The variants already differ in
+    // geometry, which is where the difference has to be.
+    const barkMaterial = createBarkMaterial({
+      windUniform: this.windUniform,
+      noiseSeed: options.seed ?? 1,
+      ...options.bark,
+    });
+    this.materials.push(barkMaterial);
+
+    const seed = options.seed ?? 1;
+    const leafMaterial = new Map<TreeType, ReturnType<typeof createLeafMaterial>>();
+    for (const type of TREE_TYPES) {
+      const material = createLeafMaterial({
+        windUniform: this.windUniform,
+        noiseSeed: seed,
+        treeHeight: TREE_PRESETS[type].height,
+        corruptionDroop: options.leaf?.corruptionDroop ?? DEFAULT_LEAF_MATERIAL_OPTIONS.corruptionDroop,
+        ...options.leaf,
+      });
+      leafMaterial.set(type, material);
+      this.materials.push(material);
+    }
 
     const billboardGeometry = buildBillboardCross();
     this.geometries.push(billboardGeometry);
@@ -367,26 +520,49 @@ export class Forest {
       // only thirty-two of them.
       for (let variant = 0; variant < VARIANTS_PER_TYPE; variant++) {
         const near = generateTree(type, options.seed ?? 1, variant);
+        const barkGeometry = toGeometry(near.bark);
+        const canopyGeometry = toGeometry(near.canopy);
+        // One corruption value per instance, read by the shader's
+        // `attribute float corruption`. The tree's own position decides it, so
+        // the value is written by `rebuild` rather than baked here: the geometry
+        // is shared by every tree of this variant across the whole world, and
+        // they do not share a corruption.
+        this.attachCorruption(barkGeometry, tierCapacity);
+        this.attachCorruption(canopyGeometry, tierCapacity);
         this.nearBark.set(
           `${type}:${variant}`,
-          this.makeInstanced(toGeometry(near.bark), barkMaterial, tierCapacity, type, `near${variant}-bark`),
+          this.makeInstanced(barkGeometry, barkMaterial, tierCapacity, `${type}-near${variant}-bark`),
         );
         this.nearCanopy.set(
           `${type}:${variant}`,
-          this.makeInstanced(toGeometry(near.canopy), leafMaterial, tierCapacity, type, `near${variant}-canopy`),
+          this.makeInstanced(
+            canopyGeometry,
+            leafMaterial.get(type)!,
+            tierCapacity,
+            `${type}-near${variant}-canopy`,
+          ),
         );
       }
 
       // The MEDIUM tier is a cylinder and a sphere, so a variant's branch
       // structure is not in the geometry to begin with. One mesh per type.
       const medium = generateSimplifiedTree(type, options.seed ?? 1, 0);
+      const mediumBarkGeometry = toGeometry(medium.bark);
+      const mediumCanopyGeometry = toGeometry(medium.canopy);
+      this.attachCorruption(mediumBarkGeometry, tierCapacity);
+      this.attachCorruption(mediumCanopyGeometry, tierCapacity);
       this.mediumBark.set(
         type,
-        this.makeInstanced(toGeometry(medium.bark), barkMaterial, tierCapacity, type, 'medium-bark'),
+        this.makeInstanced(mediumBarkGeometry, barkMaterial, tierCapacity, `${type}-medium-bark`),
       );
       this.mediumCanopy.set(
         type,
-        this.makeInstanced(toGeometry(medium.canopy), leafMaterial, tierCapacity, type, 'medium-canopy'),
+        this.makeInstanced(
+          mediumCanopyGeometry,
+          leafMaterial.get(type)!,
+          tierCapacity,
+          `${type}-medium-canopy`,
+        ),
       );
 
       // The FAR tier is one billboard per type. At eighty metres a billboard is
@@ -416,10 +592,21 @@ export class Forest {
         vertexColors: true,
       });
       this.materials.push(material);
-      this.farBillboard.set(
-        type,
-        this.makeInstanced(billboardGeometry, material, this.placement.length, type, 'far'),
+      const far = this.makeInstanced(
+        billboardGeometry,
+        material,
+        this.placement.length,
+        `${type}-far`,
       );
+      // Allocated once, not per rebuild: a new attribute object every time the
+      // camera crosses a grid line makes Three re-create the buffer behind it,
+      // and this is three thousand instances' worth of floats.
+      far.instanceColor = new InstancedBufferAttribute(
+        new Float32Array(this.placement.length * 3).fill(1),
+        3,
+      );
+      far.instanceColor.setUsage(DynamicDrawUsage);
+      this.farBillboard.set(type, far);
     }
   }
 
@@ -428,11 +615,10 @@ export class Forest {
     geometry: BufferGeometry,
     material: MeshStandardMaterial,
     capacity: number,
-    type: TreeType,
     label: string,
   ): InstancedMesh {
     const mesh = new InstancedMesh(geometry, material, capacity);
-    mesh.name = `forest-${type}-${label}`;
+    mesh.name = `forest-${label}`;
     // Starts at zero instances, so nothing is drawn until the first rebuild
     // fills it. A non-zero count over an unfilled buffer would draw instances
     // at the origin, which is a clump of trees in the middle of the world.
@@ -445,6 +631,174 @@ export class Forest {
     mesh.instanceMatrix.setUsage(DynamicDrawUsage);
     this.group.add(mesh);
     return mesh;
+  }
+
+  /**
+   * Give a tree geometry a per-instance corruption attribute.
+   *
+   * `InstancedBufferAttribute` rather than a plain one, because the value is a
+   * property of WHERE THE TREE STANDS rather than of the vertex: every tree of a
+   * variant shares one geometry across the whole 500 m world, and they do not
+   * share a corruption. Baking it per vertex would need a geometry per tree,
+   * which is three thousand of them.
+   *
+   * The shader declares `attribute float corruption;` either way - WebGL tells
+   * the two apart by the buffer's divisor, not by the declaration - so a mesh
+   * that is never given the attribute reads the generic value zero and every
+   * corruption term is a no-op. That is what keeps the far tier working without
+   * a buffer of its own.
+   */
+  private attachCorruption(geometry: BufferGeometry, capacity: number): void {
+    const attribute = new InstancedBufferAttribute(new Float32Array(capacity), 1);
+    attribute.setUsage(DynamicDrawUsage);
+    geometry.setAttribute('corruption', attribute);
+  }
+
+  /** Build the fungal shelf meshes and their material. */
+  private buildShelfMeshes(options: ForestOptions): void {
+    // One material for every variant. The shelf's tint is carried per instance
+    // by `aVariation`, which is what distinguishes one bracket from another, so
+    // there is nothing left for a per-variant material to do.
+    const material = createFungusMaterial('shelf', {
+      windUniform: this.windUniform,
+      noiseSeed: options.seed ?? 1,
+      // A bracket is stiff. It is a few centimetres thick and a third of a
+      // metre across, and the wind that moves a fern would make it twitch.
+      windStrength: 0.012,
+      flutterStrength: 0.05,
+    });
+    this.materials.push(material);
+
+    for (let variant = 0; variant < SHELF_VARIANTS; variant++) {
+      const geometry = toGeometry(generateFungalShelf(options.seed ?? 1, variant));
+      const variation = new InstancedBufferAttribute(new Float32Array(SHELF_BUDGET), 1);
+      variation.setUsage(DynamicDrawUsage);
+      geometry.setAttribute('aVariation', variation);
+      this.geometries.push(geometry);
+      this.shelf.set(
+        variant,
+        this.makeInstanced(geometry, material, SHELF_BUDGET, `shelf${variant}`),
+      );
+    }
+  }
+
+  /**
+   * Grow fungal brackets on the corrupted trunks of the near tier.
+   *
+   * Called from `rebuild`, because a shelf belongs to a tree instance: its
+   * height, azimuth and scale all come from the tree it grows on, and the tier
+   * rebuild is the only thing that knows which trees are currently drawn.
+   *
+   * Everything here is a pure function of the tree's placement index, so
+   * walking away and back produces exactly the same shelves. A rebuild that
+   * reshuffled them would show as the forest's rot crawling around as the
+   * player paces.
+   */
+  private buildShelves(near: readonly number[]): void {
+    const counters = new Map<InstancedMesh, number>();
+    const matrix = new Matrix4();
+    const position = new Vector3();
+    const radial = new Vector3();
+    const scale = new Vector3(1, 1, 1);
+    const treeQuat = new Quaternion();
+    const shelfYaw = new Quaternion();
+    const rotationForShelves = new Quaternion();
+    const leanAxis = new Vector3();
+    const leanQuat = new Quaternion();
+    const yawQuat = new Quaternion();
+
+    for (const i of near) {
+      const tree = this.placement[i];
+      const corruption = this.corruptionAt(tree.x, tree.z);
+      if (!Number.isFinite(corruption) || corruption < SHELF_MIN_CORRUPTION) continue;
+
+      const preset = TREE_PRESETS[tree.type];
+      const treeHeight = preset.height * tree.scale;
+      // The tree's own orientation, so a shelf sits on a leaning trunk rather
+      // than beside it.
+      leanAxis.set(Math.cos(tree.leanRoll), 0, Math.sin(tree.leanRoll));
+      leanQuat.setFromAxisAngle(leanAxis, tree.lean);
+      yawQuat.setFromAxisAngle(WORLD_UP, tree.rotationY);
+      treeQuat.copy(leanQuat).multiply(yawQuat);
+
+      // One shelf at stage one, three at stage three. The count is what carries
+      // the progression: a single bracket reads as an outlier, and a trunk
+      // stacked with them reads as the tree being eaten.
+      // `SHELF_MAX_PER_TREE - 1`, because the one shelf a stage-one tree grows
+      // is not an extra shelf on top of the maximum: at full corruption the
+      // count has to be exactly `SHELF_MAX_PER_TREE`, not one more than it.
+      const shelves = 1 + Math.floor(corruption * (SHELF_MAX_PER_TREE - 1));
+      // Spread around the trunk rather than clumping on one side. Real bracket
+      // fungi do cluster, but on a procedurally placed tree a clump on the
+      // camera-facing side is visible and one on the far side is wasted, and
+      // spreading is the only rule that works from every angle.
+      const spin = shelfHash(i, 0x5e14);
+
+      for (let s = 0; s < shelves; s++) {
+        const rng = createRng(shelfHash(i, s + 1));
+        const variant = shelfHash(i, s + 0x40) % SHELF_VARIANTS;
+        const mesh = this.shelf.get(variant);
+        if (!mesh) continue;
+        if ((counters.get(mesh) ?? 0) >= SHELF_BUDGET) {
+          this.dropped++;
+          continue;
+        }
+        const index = (counters.get(mesh) ?? 0);
+        counters.set(mesh, index + 1);
+
+        // Evenly spaced in height with jitter, and never above the lowest
+        // limb: a bracket growing out of a branch tip is a bracket hanging in
+        // mid-air.
+        const even = (s + 0.5) / shelves;
+        const f = Math.min(
+          SHELF_HIGH,
+          Math.max(SHELF_LOW, SHELF_LOW + even * (SHELF_HIGH - SHELF_LOW) + (rng() - 0.5) * 0.12),
+        );
+        const azimuth = spin + (s / shelves) * Math.PI * 2 + (rng() - 0.5) * 0.8;
+
+        // The trunk tapers. Without this a shelf placed at half the tree's
+        // height floats that far off the surface.
+        const trunkRadius =
+          preset.trunkRadius * tree.scale * Math.max(0.12, 1 - 0.62 * f);
+
+        radial.set(Math.cos(azimuth) * trunkRadius, f * treeHeight, Math.sin(azimuth) * trunkRadius);
+        radial.applyQuaternion(treeQuat);
+        position.set(tree.x + radial.x, tree.y + radial.y, tree.z + radial.z);
+
+        // The arc centre is aimed outward, which is why the generator takes it
+        // as a parameter: the shelf is a partial ring, and a partial ring at an
+        // arbitrary azimuth can easily land on the far side of the trunk, where
+        // it is inside the tree and invisible.
+        shelfYaw.setFromAxisAngle(WORLD_UP, azimuth - SHELF_ARC_CENTRE);
+        rotationForShelves.copy(treeQuat).multiply(shelfYaw);
+
+        // Brackets grow with the rot and with the tree. A shelf the width of a
+        // sapling's trunk on a two-metre oak reads as a floating prop, and a
+        // shelf that is the same size at every stage gives the progression
+        // nothing to say.
+        const size =
+          tree.scale *
+          (0.7 + 0.5 * corruption) *
+          Math.min(1.4, Math.max(0.65, preset.trunkRadius / 0.3));
+        scale.set(size, size, size);
+        matrix.compose(position, rotationForShelves, scale);
+        mesh.setMatrixAt(index, matrix);
+
+        const variation = mesh.geometry.getAttribute('aVariation') as InstancedBufferAttribute;
+        variation.setX(index, rng());
+      }
+    }
+
+    for (const [mesh, count] of counters) {
+      mesh.count = count;
+      mesh.instanceMatrix.needsUpdate = true;
+      const variation = mesh.geometry.getAttribute('aVariation') as InstancedBufferAttribute;
+      variation.needsUpdate = true;
+    }
+    for (const mesh of this.shelf.values()) {
+      if (!counters.has(mesh)) mesh.count = 0;
+    }
+    this.shelfCount = [...counters.values()].reduce((a, b) => a + b, 0);
   }
 
   /** Build the six foliage meshes and their materials. */
@@ -539,6 +893,13 @@ export class Forest {
     const leanQuat = new Quaternion();
     const yawQuat = new Quaternion();
 
+    // Read once per rebuild rather than once per instance: the corruption field
+    // is a lattice lookup, and the near tier writes it for every tree it draws.
+    const corruptionOf = (x: number, z: number): number => {
+      const c = this.corruptionAt(x, z);
+      return Number.isFinite(c) ? Math.min(1, Math.max(0, c)) : 0;
+    };
+
     const place = (mesh: InstancedMesh, tree: TreeInstance, variant: number): void => {
       // A drop is counted, not swallowed. Silently leaving a tree out of its
       // tier produces a forest with holes in it that no test looking at
@@ -563,6 +924,15 @@ export class Forest {
       scale.set(s, s, s);
       matrix.compose(position, rotation, scale);
       mesh.setMatrixAt(index, matrix);
+
+      // The corruption attribute, written in the same pass as the matrix. Both
+      // are per instance and both are rebuilt together, so splitting them would
+      // mean two walks over the same tier.
+      const attribute = mesh.geometry.getAttribute('corruption') as InstancedBufferAttribute | undefined;
+      if (attribute) {
+        attribute.setX(index, corruptionOf(tree.x, tree.z));
+        attribute.needsUpdate = true;
+      }
     };
 
     for (const i of tiers.near) {
@@ -579,6 +949,29 @@ export class Forest {
     for (const i of tiers.far) {
       const tree = this.placement[i];
       place(this.farBillboard.get(tree.type)!, tree, tree.variant);
+      // The same yellow-green the leaf shader reaches for at full strength,
+      // applied as a multiply: at eighty metres a crown's colour is all that
+      // distinguishes a dying tree from a healthy one, and a forest that turns
+      // green again at the LOD boundary reads as two forests.
+      // Corruption of the far tier is carried on the instance colour instead.
+      // The billboard texture is baked and its material has no corruption
+      // attribute, so a tint is the only channel left - and Three already
+      // multiplies the vertex colour by `instanceColor` when one is present,
+      // which makes it free.
+      //
+      // The same yellow-green the leaf shader reaches for at full strength: at
+      // eighty metres a crown's colour is all that distinguishes a dying tree
+      // from a healthy one, and a forest that turns green again at the LOD
+      // boundary reads as two forests.
+      const mesh = this.farBillboard.get(tree.type)!;
+      const c = corruptionOf(tree.x, tree.z);
+      const tint = mesh.instanceColor;
+      if (tint) {
+        tint.setXYZ(i, 1 - c * 0.42, 1 - c * 0.28, 1 - c * 0.62);
+      }
+    }
+    for (const mesh of this.farBillboard.values()) {
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
 
     for (const [mesh, count] of counters) {
@@ -594,9 +987,17 @@ export class Forest {
       ...this.mediumBark.values(),
       ...this.mediumCanopy.values(),
       ...this.farBillboard.values(),
+      ...this.shelf.values(),
     ]) {
       if (!counters.has(mesh)) mesh.count = 0;
     }
+
+    // AFTER the emptying loop, not before it. The loop empties every mesh the
+    // tree tiers did not touch this round, and the shelves are not in the tree
+    // tiers' counter map - so building them first had every bracket placed and
+    // then immediately zeroed, which is a shelf count that is non-zero in the
+    // stats and an empty mesh on screen.
+    this.buildShelves(tiers.near);
 
     this.rebuildColliders(cameraX, cameraZ);
     this.updateStats(tiers.near.length, tiers.medium.length, tiers.far.length);
@@ -780,6 +1181,7 @@ export class Forest {
       ...this.mediumCanopy.values(),
       ...this.farBillboard.values(),
       ...this.foliage.values(),
+      ...this.shelf.values(),
     ];
     for (const mesh of meshes) {
       if (mesh.count === 0) continue;
@@ -795,6 +1197,7 @@ export class Forest {
       medium,
       far,
       foliage: this.foliageInstances.length,
+      shelves: this.shelfCount,
       colliders: this.colliders.size,
       dropped: this.dropped,
       drawCalls,
@@ -830,6 +1233,7 @@ export class Forest {
       ...this.mediumCanopy.values(),
       ...this.farBillboard.values(),
       ...this.foliage.values(),
+      ...this.shelf.values(),
     ]) {
       mesh.dispose();
     }
@@ -839,6 +1243,8 @@ export class Forest {
     this.mediumCanopy.clear();
     this.farBillboard.clear();
     this.foliage.clear();
+    this.shelf.clear();
+    this.shelfCount = 0;
     this.dropped = 0;
 
     for (const geometry of this.geometries) geometry.dispose();

@@ -135,6 +135,16 @@ export interface ForestField {
   normalAt?: (x: number, z: number) => { x: number; y: number; z: number };
   distanceToStream?: (x: number, z: number) => number;
   pollutionAt?: (x: number, z: number) => number;
+  /**
+   * 0..1 corruption intensity.
+   *
+   * Optional because a forest without a stream has nothing to be corrupted by,
+   * and every consumer of it treats an absent sampler as zero. It is the same
+   * quantity the terrain bakes into its `corruption` attribute and the same one
+   * `CorruptionField` produces, so a tree, a patch of ground and a mushroom all
+   * agree about how rotten a place is.
+   */
+  corruptionAt?: (x: number, z: number) => number;
 }
 
 /** One placed tree. Everything a renderer needs, and nothing it does not. */

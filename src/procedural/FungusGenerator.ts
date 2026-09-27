@@ -379,7 +379,7 @@ function appendMushroom(
  * places it against, which is exactly where a bracket's root belongs. The two
  * ends of the arc are capped with flat elliptical discs.
  */
-export function generateFungalShelf(seed: number, variant = 0): MeshData {
+export function generateFungalShelf(seed: number, variant = 0, arcCentre = 0): MeshData {
   const rng = createRng(hash(seed, variant, 0x53_4845));
   const positions: number[] = [];
   const normals: number[] = [];
@@ -399,8 +399,12 @@ export function generateFungalShelf(seed: number, variant = 0): MeshData {
     const reach = SHELF_REACH * (0.62 + 0.38 * t);
     const thickness = SHELF_THICKNESS * (0.7 + 0.3 * t);
     const y = t * SHELF_REACH * 0.9;
-    const arcStart = rng() * Math.PI * 2;
     const arcSpan = 1.5 + rng() * 1.3;
+    // The caller may aim the arc. Left to the generator, the arc starts at a
+    // random azimuth, and a partial ring at an arbitrary azimuth can land on the
+    // far side of whatever it is growing on - inside the trunk, where it is
+    // invisible. Aiming it is what makes a shelf placeable.
+    const arcStart = arcCentre - arcSpan * 0.5;
 
     appendShelf(out, {
       reach,
