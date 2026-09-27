@@ -306,8 +306,8 @@ export class CorruptionField {
     return corruptionIntensity(distance, pollution);
   }
 
-  /** 0..3 zone at a world position. */
-  stageAt(x: number, z: number): number {
+  /** Which of the four zones a world position falls in. */
+  stageAt(x: number, z: number): CorruptionStage {
     return corruptionStage(this.corruptionAt(x, z));
   }
 }

@@ -82,8 +82,6 @@ describe('corruptionIntensity', () => {
     // because there is more of the stuff to spread. A fixed reach would put a
     // hard-edged ring of identical stage-1 blight around the entire stream.
     const reachFor = (pollution: number): number => {
-      const o = DEFAULT_CORRUPTION_FIELD_OPTIONS;
-      const expected = o.reachMin + (o.reachMax - o.reachMin) * pollution;
       // Binary search the falloff for the last distance that is non-zero.
       let lo = 0;
       let hi = 200;
@@ -202,13 +200,16 @@ describe('corruptionStage', () => {
 });
 
 describe('CorruptionField', () => {
-  const spline = new StreamSpline({ seed: 7 });
+  // The default sweep, not a seeded one: `StreamSpline` takes control points
+  // and a sample count, and a `seed` there would be a silently ignored option
+  // rather than a different stream.
+  const spline = new StreamSpline();
   const field = new CorruptionField(spline, { size: 500 });
 
   it('agrees with the stream profile on the water', () => {
     // The same spline, the same three zones, the same curve: the corruption
     // field must not disagree with the water it is measuring.
-    const profile = new StreamProfile(spline, { seed: 7 });
+    const profile = new StreamProfile(spline, { seed: 0 });
     for (let i = 0; i <= 20; i++) {
       const distance = (i / 20) * spline.length;
       const p = spline.pointAtDistance(distance);
@@ -261,7 +262,8 @@ describe('CorruptionField', () => {
     let total = 0;
     for (let x = -200; x <= 200; x += 4) {
       for (let z = -200; z <= 200; z += 4) {
-        area.set(field.stageAt(x, z), (area.get(field.stageAt(x, z)) ?? 0) + 1);
+        const stage = field.stageAt(x, z);
+        area.set(stage, (area.get(stage) ?? 0) + 1);
         total++;
       }
     }
