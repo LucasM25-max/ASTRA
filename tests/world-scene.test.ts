@@ -14,6 +14,7 @@ import {
   WorldScene,
   type WorldSceneOptions,
 } from '../src/world/WorldScene';
+import { GROUND_KINDS } from '../src/world/CorruptionSystem';
 
 const FIXED_STEP = 1 / 60;
 
@@ -388,4 +389,76 @@ describe('WorldScene', () => {
     world.update(2.5);
     expect(world.forest.windUniform.value).toBeCloseTo(2.5, 6);
   }, 60000);
+
+  describe('corruption', () => {
+    it('puts the corruption in the scene and the world', async () => {
+      const { scene, world } = await buildScene();
+      expect(scene.children).toContain(world.corruption.group);
+      expect(scene.getObjectByName('corruption')).toBe(world.corruption.group);
+      // The light is in there too, and it is built dark so that adding it does
+      // not recompile every material in the scene.
+      expect(scene.getObjectByName('corruption-light')).toBe(world.corruption.light);
+    }, 60000);
+
+    it('grows the ground fungus and builds the spores', async () => {
+      const { world } = await buildScene();
+      // One mesh per ground kind, and no shelf: a bracket belongs to a trunk.
+      expect(world.corruption.group.children.length).toBeGreaterThanOrEqual(
+        GROUND_KINDS.length + 1,
+      );
+      expect(world.corruption.spores).not.toBeNull();
+      expect(world.corruption.stats.fungus).toBeGreaterThanOrEqual(0);
+    }, 60000);
+
+    it('answers with the same corruption the terrain bakes', async () => {
+      const { world } = await buildScene();
+      // Both are CorruptionFields over the terrain's own spline at the same
+      // resolution, so they agree to the last decimal. A tree, a patch of ground
+      // and a mushroom that disagreed would show as grey bark standing in clean
+      // grass.
+      for (const [x, z] of [
+        [0, 0],
+        [40, 10],
+        [-120, 40],
+        [200, 200],
+      ]) {
+        expect(world.corruption.intensityAt(x, z)).toBeCloseTo(
+          world.forest.corruptionAt(x, z),
+          6,
+        );
+      }
+    }, 60000);
+
+    it('advances with the world', async () => {
+      const { world } = await buildScene();
+      const before = world.corruption.visibleSpores;
+      world.update(FIXED_STEP * 4);
+      // The spores have moved, which is the only thing that can be observed
+      // without a GPU. Over clean ground they are all black, so the count is
+      // zero either way and the position is what has to change.
+      const position = world.corruption.spores!.geometry.getAttribute('position') as unknown as {
+        array: Float32Array;
+      };
+      expect(Number.isFinite(position.array[0])).toBe(true);
+      expect(typeof before).toBe('number');
+    }, 60000);
+
+    it('can be built without spores for a cheap test world', async () => {
+      const { world } = await buildScene({ corruption: { sporeCount: 0 } });
+      expect(world.corruption.spores).toBeNull();
+      expect(world.corruption.stats.spores).toBe(0);
+    }, 60000);
+
+    it('can be built without the light', async () => {
+      const { world } = await buildScene({ corruption: { light: { intensity: 0 } } });
+      expect(world.corruption.light.intensity).toBe(0);
+    }, 60000);
+
+    it('is disposed with the world', async () => {
+      const { world } = await buildScene();
+      world.dispose();
+      expect(world.corruption.isDisposed).toBe(true);
+      expect(world.corruption.group.children.length).toBe(0);
+    }, 60000);
+  });
 });

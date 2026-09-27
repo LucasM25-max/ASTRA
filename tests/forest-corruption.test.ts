@@ -212,6 +212,56 @@ describe('forest corruption plumbing', () => {
   });
 });
 
+describe('foliage corruption', () => {
+  it('gives every foliage mesh a corruption attribute', () => {
+    const forest = make();
+    const meshes = byName(forest, /^forest-foliage-/);
+    expect(meshes.length).toBe(6);
+    for (const mesh of meshes) {
+      const attribute = mesh.geometry.getAttribute('corruption');
+      expect(attribute, `${mesh.name} has no corruption attribute`).not.toBeUndefined();
+      // Per instance, not per vertex: one value for a whole clump of grass.
+      expect((attribute as unknown as { array: Float32Array }).array.length).toBe(
+        mesh.instanceMatrix.count,
+      );
+    }
+  });
+
+  it('writes the corruption of the ground each clump stands on', () => {
+    const forest = make();
+    // The rock is excluded from the shader, but the attribute is still written:
+    // the geometry is shared with nothing, and a missing attribute would read as
+    // the generic zero on every driver rather than as a decision.
+    const field = new CorruptionField(spline);
+    for (const mesh of byName(forest, /^forest-foliage-/)) {
+      const attribute = mesh.geometry.getAttribute('corruption') as unknown as {
+        array: Float32Array;
+      };
+      for (let i = 0; i < mesh.count; i++) {
+        const m = mesh.instanceMatrix.array;
+        const o = i * 16;
+        const c = attribute.array[i];
+        expect(Number.isFinite(c)).toBe(true);
+        expect(c).toBeGreaterThanOrEqual(0);
+        expect(c).toBeLessThanOrEqual(1);
+        if (c === 0) continue;
+        expect(c).toBeCloseTo(field.corruptionAt(m[o + 12], m[o + 14]), 5);
+      }
+    }
+  });
+
+  it('is clean when there is no stream', () => {
+    const forest = new Forest({ heightAt, normalAt, seed: 3, size: 120 });
+    open.push(forest);
+    for (const mesh of byName(forest, /^forest-foliage-/)) {
+      const attribute = mesh.geometry.getAttribute('corruption') as unknown as {
+        array: Float32Array;
+      };
+      for (let i = 0; i < mesh.count; i++) expect(attribute.array[i]).toBe(0);
+    }
+  });
+});
+
 describe('per-type leaf materials', () => {
   it('gives each tree type its own leaf material and one shared bark', () => {
     const forest = make();
@@ -258,6 +308,44 @@ describe('per-type leaf materials', () => {
     // And the four heights are genuinely different, which is the whole reason
     // the materials are per type.
     expect(new Set(seen.values()).size).toBe(TREE_TYPES.length);
+  });
+
+  it('carries the twist on every type', () => {
+    const forest = make();
+    const twists = new Set<number>();
+    forest.group.traverse((child) => {
+      const mesh = child as InstancedMesh;
+      if (!mesh.isInstancedMesh || !/-canopy$/.test(mesh.name)) return;
+      const material = mesh.material as unknown as {
+        onBeforeCompile: (shader: Record<string, unknown>, renderer?: unknown) => void;
+      };
+      const uniforms: Record<string, { value: unknown }> = {};
+      material.onBeforeCompile(
+        {
+          uniforms,
+          vertexShader: 'void main() { #include <begin_vertex> }',
+          fragmentShader: 'void main() {}',
+        } as never,
+        undefined as never,
+      );
+      twists.add(uniforms.uTreeTwist.value as number);
+    });
+    // One value, because the twist is a fraction of the crown's own sweep
+    // rather than a number of metres: it needs no per-type scaling, unlike the
+    // droop.
+    expect(twists.size).toBe(1);
+    expect([...twists][0]).toBeGreaterThan(0);
+  });
+
+  it('keeps the wind uniform the forest own', () => {
+    // A caller's `leaf.windUniform` would otherwise replace the one object
+    // every tree, fern and shelf in the forest is phased on, and the forest
+    // would stop moving while the rest of the world swayed.
+    const shared = { value: 0 };
+    const forest = make({ leaf: { windUniform: shared } });
+    forest.update(0.5, { x: 0, y: 0, z: 0 });
+    expect(forest.windUniform.value).toBeCloseTo(0.5, 6);
+    expect(shared.value).toBe(0);
   });
 });
 

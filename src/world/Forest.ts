@@ -480,9 +480,13 @@ export class Forest {
     // thirty-two uniform sets where four do. The variants already differ in
     // geometry, which is where the difference has to be.
     const barkMaterial = createBarkMaterial({
+      ...options.bark,
+      // The wind uniform comes last, and that is deliberate. A caller's
+      // `bark.windUniform` would otherwise replace the one object every tree,
+      // fern and shelf in this forest is phased on, and the forest would stop
+      // moving while the rest of the world swayed - a bug with no visible cause.
       windUniform: this.windUniform,
       noiseSeed: options.seed ?? 1,
-      ...options.bark,
     });
     this.materials.push(barkMaterial);
 
@@ -490,11 +494,24 @@ export class Forest {
     const leafMaterial = new Map<TreeType, ReturnType<typeof createLeafMaterial>>();
     for (const type of TREE_TYPES) {
       const material = createLeafMaterial({
+        ...options.leaf,
+        // These come last on purpose, for two different reasons.
+        //
+        // The wind uniform is the forest's own: a caller's would replace the one
+        // object every tree and fern is phased on and stop the forest moving.
+        //
+        // The height, the droop and the twist are properties of the TYPE rather
+        // than of the caller's taste. They are the whole reason the leaf material
+        // is per type: a caller's `treeHeight` would be one number for a 10 m oak
+        // and a 3 m sapling, and whichever it picked would be wrong for the other
+        // - the sapling flattened and the oak untouched.
         windUniform: this.windUniform,
         noiseSeed: seed,
         treeHeight: TREE_PRESETS[type].height,
-        corruptionDroop: options.leaf?.corruptionDroop ?? DEFAULT_LEAF_MATERIAL_OPTIONS.corruptionDroop,
-        ...options.leaf,
+        corruptionDroop:
+          options.leaf?.corruptionDroop ?? DEFAULT_LEAF_MATERIAL_OPTIONS.corruptionDroop,
+        corruptionTwist:
+          options.leaf?.corruptionTwist ?? DEFAULT_LEAF_MATERIAL_OPTIONS.corruptionTwist,
       });
       leafMaterial.set(type, material);
       this.materials.push(material);
@@ -812,6 +829,10 @@ export class Forest {
       );
       variation.setUsage(DynamicDrawUsage);
       geometry.setAttribute('aVariation', variation);
+      // And one per instance for the corruption, read by the material's
+      // `corruption` attribute. Same name the terrain and the trees use, for the
+      // same reason: one field, one name.
+      this.attachCorruption(geometry, Math.max(1, DEFAULT_FOLIAGE_COUNTS[kind]));
       this.geometries.push(geometry);
 
       const material = createFoliageMaterial(kind, {
@@ -1090,10 +1111,18 @@ export class Forest {
       const mesh = this.foliage.get(kind)!;
       const list = perKind.get(kind) ?? [];
       const variation = mesh.geometry.getAttribute('aVariation') as InstancedBufferAttribute;
+      const corruption = mesh.geometry.getAttribute('corruption') as InstancedBufferAttribute | undefined;
       const capacity = Math.min(variation.count, list.length);
 
       for (let i = 0; i < capacity; i++) {
         const instance = list[i];
+        if (corruption) {
+          // The corruption where this clump stands. Written in the same pass as
+          // the matrix and the tint, because all three are per instance and all
+          // three are rebuilt together.
+          const c = this.corruptionAt(instance.x, instance.z);
+          corruption.setX(i, Number.isFinite(c) ? Math.min(1, Math.max(0, c)) : 0);
+        }
         // Tilt away from vertical about an axis perpendicular to the lean, then
         // spin about the world Y. Order matters: tilting after the spin would
         // lean every plant toward the same world direction regardless of which
@@ -1112,6 +1141,7 @@ export class Forest {
       mesh.count = capacity;
       mesh.instanceMatrix.needsUpdate = true;
       variation.needsUpdate = true;
+      if (corruption) corruption.needsUpdate = true;
     }
   }
 

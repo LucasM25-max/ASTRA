@@ -121,6 +121,12 @@ export interface LeafMaterialOptions {
   treeHeight?: number;
   /** How far a fully corrupted canopy drops, as a fraction of its height. */
   corruptionDroop?: number;
+  /**
+   * How far a fully corrupted crown twists about the tree's own axis, radians.
+   *
+   * The plan's "twisted trees" in the inner zone. Zero disables it.
+   */
+  corruptionTwist?: number;
 }
 
 /** Defaults, exported so tests and the debug overlay can read them. */
@@ -148,6 +154,10 @@ export const DEFAULT_LEAF_MATERIAL_OPTIONS = {
   windStrength: 0.05,
   treeHeight: 0,
   corruptionDroop: 0.14,
+  // Seven degrees at the top of the crown. Enough to change the silhouette of
+  // a whole oak, small enough that the crown's own blobs - a metre and a bit
+  // across - still sit over the branches that hold them.
+  corruptionTwist: 0.12,
 } as const;
 
 /**
@@ -476,6 +486,7 @@ export function patchLeafShader(
   // silently deletes the entire canopy.
   shader.uniforms.uTreeHeight = { value: options.treeHeight ?? 0 };
   shader.uniforms.uTreeDroop = { value: options.corruptionDroop ?? 0 };
+  shader.uniforms.uTreeTwist = { value: options.corruptionTwist ?? 0 };
 
   /* ---------------------------------------------------------------- vertex */
 
@@ -491,6 +502,7 @@ export function patchLeafShader(
       varying float vAstraCorruption;
       uniform float uTreeHeight;
       uniform float uTreeDroop;
+      uniform float uTreeTwist;
       ${NOISE_GLSL}
       ${SWAY_GLSL}
     `,
@@ -525,14 +537,36 @@ export function patchLeafShader(
         // bounding box, because the material is shared by every tree of a type
         // and the shader has no access to which type it is drawing.
         float c = clamp( corruption, 0.0, 1.0 );
-        if ( c > 0.001 && uTreeDroop > 0.0 ) {
+        if ( c > 0.001 && ( uTreeDroop > 0.0 || uTreeTwist > 0.0 ) ) {
           float h = clamp( transformed.y / max( uTreeHeight, 1e-4 ), 0.0, 1.0 );
-          float fall = c * uTreeDroop * uTreeHeight * h * h;
-          transformed.y -= fall;
-          // And the crown closes up as it falls, so the silhouette narrows. A
-          // crown that only sinks keeps its spread and reads as a smaller tree
-          // rather than a wilting one.
-          transformed.xz *= 1.0 - c * 0.12 * h * h;
+          if ( uTreeDroop > 0.0 ) {
+            float fall = c * uTreeDroop * uTreeHeight * h * h;
+            transformed.y -= fall;
+            // And the crown closes up as it falls, so the silhouette narrows. A
+            // crown that only sinks keeps its spread and reads as a smaller tree
+            // rather than a wilting one.
+            transformed.xz *= 1.0 - c * 0.12 * h * h;
+          }
+          if ( uTreeTwist > 0.0 ) {
+            // The crown twists: the plan's "twisted trees" in the inner zone. A
+            // trunk that spirals reads as something that grew wrong rather than
+            // as something that was broken, which is a different story from the
+            // droop's.
+            //
+            // The rotation is about the tree's own axis through its base, and
+            // its angle grows with the height, so the trunk does not move and
+            // only the crown turns. Applied to the canopy alone and never to the
+            // bark: the trunk collider is a straight vertical capsule, and a
+            // trunk that visibly spiralled away from it would be a collision bug
+            // rather than a look.
+            float twist = c * uTreeTwist * h;
+            float ts = sin( twist );
+            float tc = cos( twist );
+            transformed.xz = vec2(
+              transformed.x * tc - transformed.z * ts,
+              transformed.x * ts + transformed.z * tc
+            );
+          }
         }
       }
 

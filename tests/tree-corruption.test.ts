@@ -186,6 +186,41 @@ describe('leaf corruption', () => {
     expect(block).not.toContain('float fall = c * uTreeDroop * h;');
   });
 
+  it('twists the crown about the tree own axis, and only the crown', () => {
+    const v = patched((s) =>
+      patchLeafShader(s, leafOptions({ treeHeight: 10 }), { value: 0 }),
+    ).vertexShader;
+    const block = between(v, '#include <begin_vertex>', 'vec2 offset = astraSway');
+    // The angle grows with the normalised height, so the trunk does not turn at
+    // all and only the crown does. A constant angle would spin the whole tree
+    // about its base, which is a different and much wronger effect.
+    expect(block).toContain('float twist = c * uTreeTwist * h;');
+    expect(block).toContain('float ts = sin( twist );');
+    expect(block).toContain('float tc = cos( twist );');
+    // Written out as an explicit 2D rotation rather than as a mat2 multiply: the
+    // column-major convention makes `mat2( c, s, -s, c )` easy to get backwards,
+    // and a backwards twist is invisible in review.
+    expect(block).toContain('transformed.x * tc - transformed.z * ts');
+    expect(block).toContain('transformed.x * ts + transformed.z * tc');
+    // And it is in the leaf shader only. The bark never twists: the trunk
+    // collider is a straight vertical capsule, and a trunk that spiralled away
+    // from it would be a collision bug rather than a look.
+    const bark = patched((s) => patchBarkShader(s, barkOptions(), { value: 0 }));
+    expect(bark.vertexShader).not.toContain('uTreeTwist');
+    expect(bark.vertexShader).not.toContain('float twist');
+  });
+
+  it('parses as GLSL with the twist on', () => {
+    const v = patched((s) =>
+      patchLeafShader(
+        s,
+        leafOptions({ treeHeight: 10, corruptionDroop: 0.14, corruptionTwist: 0.12 }),
+        { value: 0 },
+      ),
+    ).vertexShader;
+    expect(() => parse(v)).not.toThrow();
+  });
+
   it('drops the canopy downward and narrows it as it falls', () => {
     const v = patched((s) =>
       patchLeafShader(s, leafOptions(), { value: 0 }),
@@ -201,9 +236,10 @@ describe('leaf corruption', () => {
     const v = patched((s) =>
       patchLeafShader(s, leafOptions(), { value: 0 }),
     ).vertexShader;
-    // Both guards, so a caller that disables the droop gets exactly the
-    // unpatched vertex positions back rather than a canopy that still sinks.
-    expect(v).toContain('if ( c > 0.001 && uTreeDroop > 0.0 ) {');
+    // The guard covers both terms, so a caller that disables the droop and the
+    // twist gets exactly the unpatched vertex positions back rather than a
+    // canopy that still sinks or turns.
+    expect(v).toContain('if ( c > 0.001 && ( uTreeDroop > 0.0 || uTreeTwist > 0.0 ) ) {');
   });
 
   it('parses as GLSL inside Three real standard-material vertex shader', () => {
@@ -239,6 +275,13 @@ describe('corruption options', () => {
     // that sinks reads as the tree settling into the ground.
     expect(DEFAULT_BARK_MATERIAL_OPTIONS.corruptionDroop).toBe(0);
     expect(DEFAULT_LEAF_MATERIAL_OPTIONS.corruptionDroop).toBe(0.14);
+    // And the twist is on by default, at seven degrees at the top of the crown:
+    // enough to change a whole oak's silhouette, small enough that the crown's
+    // own blobs still sit over the branches that hold them.
+    expect(DEFAULT_LEAF_MATERIAL_OPTIONS.corruptionTwist).toBeCloseTo(0.12, 6);
+    // The bark has no twist option at all, rather than one that defaults to
+    // zero: a trunk that spirals would leave the vertical capsule collider.
+    expect('corruptionTwist' in DEFAULT_BARK_MATERIAL_OPTIONS).toBe(false);
   });
 
   it('leaves both tree heights at zero by default, which disables the droop', () => {
@@ -251,10 +294,15 @@ describe('corruption options', () => {
 
   it('routes the droop options into uniforms', () => {
     const shader = patched((s) =>
-      patchLeafShader(s, leafOptions({ treeHeight: 10.1, corruptionDroop: 0.2 }), { value: 0 }),
+      patchLeafShader(
+        s,
+        leafOptions({ treeHeight: 10.1, corruptionDroop: 0.2, corruptionTwist: 0.3 }),
+        { value: 0 },
+      ),
     );
     expect(shader.uniforms.uTreeHeight).toEqual({ value: 10.1 });
     expect(shader.uniforms.uTreeDroop).toEqual({ value: 0.2 });
+    expect(shader.uniforms.uTreeTwist).toEqual({ value: 0.3 });
   });
 
   it('survives an explicit undefined override instead of producing a NaN', () => {
@@ -287,6 +335,7 @@ describe('corruption options', () => {
     } as never, undefined as never);
     expect(uniforms.uTreeHeight.value).toBe(7.5);
     expect(uniforms.uTreeDroop.value).toBe(0.2);
+    expect(uniforms.uTreeTwist.value).toBe(0.12);
     bark.dispose();
     leaf.dispose();
   });
@@ -395,5 +444,32 @@ describe('droop arithmetic', () => {
     // The shader skips the block entirely below 0.001, so the smallest
     // corruption that matters is invisible rather than a 0.1% sag.
     expect(droop(10, 10, 0.0005, 0.14)).toBeLessThan(0.001);
+  });
+
+  it('twists by an angle that grows with height and nothing at the base', () => {
+    const twist = (y: number, treeHeight: number, c: number, t: number): number =>
+      c * t * Math.min(1, Math.max(0, y / treeHeight));
+    expect(twist(0, 10, 1, 0.12)).toBe(0);
+    expect(twist(10, 10, 1, 0.12)).toBeCloseTo(0.12, 10);
+    // Monotonic, so the crown turns progressively rather than all at once.
+    let previous = -1;
+    for (let y = 0; y <= 10; y += 0.5) {
+      const a = twist(y, 10, 1, 0.12);
+      expect(a).toBeGreaterThanOrEqual(previous);
+      previous = a;
+    }
+    // Clamped above the top of the tree, so a vertex that should not exist does
+    // not keep turning.
+    expect(twist(40, 10, 1, 0.12)).toBeCloseTo(0.12, 10);
+  });
+
+  it('keeps the crown over its branches at full twist', () => {
+    // The crown's blobs are a bit over a metre across, so a top-of-crown twist
+    // of seven degrees at the oak's three-metre canopy radius moves a blob by
+    // about a third of a metre - well inside its own radius. This is the number
+    // that justifies the default: any larger and the leaves leave the branches.
+    const displacement = Math.sin(0.12) * 3.1;
+    expect(displacement).toBeLessThan(1.15);
+    expect(displacement).toBeGreaterThan(0.2);
   });
 });

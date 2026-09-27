@@ -217,6 +217,93 @@ describe('foliage alpha and tint', () => {
   });
 });
 
+describe('foliage corruption', () => {
+  it('declares the corruption attribute and its varying', () => {
+    for (const kind of FOLIAGE_KINDS) {
+      const shader = patched(kind);
+      if (kind === 'rock') {
+        // The rock declares none of it: a stone does not die, and a varying
+        // nobody reads is a warning on some drivers and dead weight on all.
+        expect(shader.vertexShader).not.toContain('attribute float corruption;');
+        expect(shader.fragmentShader).not.toContain('vAstraCorruption');
+        continue;
+      }
+      expect(shader.vertexShader.match(/attribute float corruption;/g)?.length).toBe(1);
+      expect(shader.vertexShader.match(/varying float vAstraCorruption;/g)?.length).toBe(1);
+      expect(shader.fragmentShader.match(/varying float vAstraCorruption;/g)?.length).toBe(1);
+      expect(shader.fragmentShader).toContain('uniform float uFoliageCorruption;');
+    }
+  });
+
+  it('writes the varying before the wind moves the vertex', () => {
+    const v = patched('grass').vertexShader;
+    const write = v.indexOf('vAstraCorruption = corruption;');
+    // The CALL, not the definition: `astraFoliageWind` is declared in
+    // `<common>`, which is injected before `<begin_vertex>`, so searching for
+    // the bare name finds the function and not the place it is used.
+    const call = v.indexOf('= astraFoliageWind(');
+    expect(write).toBeGreaterThanOrEqual(0);
+    expect(call).toBeGreaterThan(write);
+  });
+
+  it('desaturates every living kind toward its own luma and yellows it', () => {
+    for (const kind of FOLIAGE_KINDS) {
+      if (kind === 'rock') continue;
+      const f = patched(kind).fragmentShader;
+      const block = f.slice(f.indexOf('#include <map_fragment>'));
+      // The same luma weights the bark, the canopy and the terrain use, so a
+      // blade of grass and a trunk go over by the same amount in the same frame.
+      expect(block).toContain('vec3( 0.2126, 0.7152, 0.0722 )');
+      expect(block).toContain('vec3 sick = vec3( luma * 1.18, luma * 1.0, luma * 0.5 );');
+      expect(block).toContain('diffuseColor.rgb = mix( diffuseColor.rgb, sick, c );');
+    }
+  });
+
+  it('leaves the rock alone', () => {
+    // A stone does not die. A grey boulder in the middle of a rotten bank reads
+    // as a lighting bug rather than as blight.
+    const f = patched('rock').fragmentShader;
+    expect(f).not.toContain('vec3 sick');
+    expect(f).not.toContain('vAstraCorruption');
+  });
+
+  it('rots dead wood along with everything else', () => {
+    // A fallen branch is organic. Excluding it would leave bright splinters of
+    // clean timber all over the foul bank.
+    const f = patched('branch').fragmentShader;
+    expect(f).toContain('vec3 sick = vec3( luma * 1.18, luma * 1.0, luma * 0.5 );');
+  });
+
+  it('is a no-op at strength zero', () => {
+    const shader = {
+      vertexShader: THREE.ShaderLib.physical.vertexShader,
+      fragmentShader: THREE.ShaderLib.physical.fragmentShader,
+      uniforms: {} as Record<string, unknown>,
+    };
+    patchFoliageShader(shader, 'grass', {
+      ...DEFAULT_FOLIAGE_MATERIAL_OPTIONS,
+      corruptionStrength: 0,
+    });
+    // The strength multiplies the clamp rather than gating the block, so zero
+    // takes `c` to zero and the mix is exactly the original colour.
+    expect(shader.uniforms.uFoliageCorruption).toEqual({ value: 0 });
+    expect(shader.fragmentShader).toContain('* uFoliageCorruption');
+  });
+
+  it('parses as GLSL for every kind', () => {
+    for (const kind of FOLIAGE_KINDS) {
+      const shader = patched(kind);
+      expect(() => parser.parse(shader.vertexShader)).not.toThrow();
+      expect(() => parser.parse(shader.fragmentShader)).not.toThrow();
+    }
+  });
+
+  it('defaults to a visible strength', () => {
+    expect(DEFAULT_FOLIAGE_MATERIAL_OPTIONS.corruptionStrength).toBeGreaterThan(0);
+    expect(DEFAULT_FOLIAGE_MATERIAL_OPTIONS.corruptionStrength).toBeLessThanOrEqual(1);
+  });
+});
+
 describe('foliage shader hygiene', () => {
   it('declares every uniform it sets, exactly once', () => {
     for (const kind of FOLIAGE_KINDS) {

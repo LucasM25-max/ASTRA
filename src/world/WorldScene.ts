@@ -37,6 +37,10 @@
 import { Fog, type Scene } from 'three';
 import { LightingSystem } from '../renderer/LightingSystem';
 import { Forest, type ForestOptions } from './Forest';
+import {
+  CorruptionSystem,
+  type CorruptionSystemOptions,
+} from './CorruptionSystem';
 import { SkySystem, DEFAULT_HORIZON_COLOR } from '../renderer/SkySystem';
 import type { PhysicsWorld, Vec3 } from '../physics/PhysicsWorld';
 import { Player, PLAYER_HEIGHT, PLAYER_SPAWN } from '../player/Player';
@@ -135,12 +139,39 @@ export interface WorldSceneOptions {
     /** Radius of the camera-following foliage patch, in metres. */
     foliageRadius?: number;
   };
+  /**
+   * Corruption parameters. Defaults to the standard rot along the stream.
+   *
+   * The corruption system needs the terrain's height sampler and the stream's
+   * spline, and takes both from what was just built - so the only things worth
+   * passing here are a different seed, a smaller patch for a cheap test world,
+   * and `sporeCount: 0` for a test that does not want the particles.
+   */
+  corruption?: {
+    /** The stream path the corruption field is built over. Defaults to the terrain's. */
+    spline?: StreamSpline;
+    /** World seed. Defaults to the terrain's. */
+    seed?: number;
+    /** Radius of the camera-following fungus patch, in metres. */
+    patchRadius?: number;
+    /** Triangles the ground fungus may cost per patch. */
+    triangleBudget?: number;
+    /** Per-kind instance counts, overriding the budget-derived defaults. */
+    counts?: CorruptionSystemOptions['counts'];
+    /** Number of drifting spores. Zero disables them entirely. */
+    sporeCount?: number;
+    /** Radius of the disc the spores drift in, in metres. */
+    sporeRadius?: number;
+    /** The light that comes off the rot. Pass `intensity: 0` to disable it. */
+    light?: { intensity?: number; color?: number; distance?: number };
+  };
 }
 
 export class WorldScene {
   readonly terrain: Terrain;
   readonly stream: Stream;
   readonly forest: Forest;
+  readonly corruption: CorruptionSystem;
   readonly sky: SkySystem;
   readonly lighting: LightingSystem;
   readonly player: Player;
@@ -215,9 +246,34 @@ export class WorldScene {
       foliageRadius: options.forest?.foliageRadius,
     });
 
+    // The corruption is built last of the three that grow out of the terrain,
+    // because it needs the terrain's samplers and the stream's path and adds
+    // nothing either of them depends on.
+    this.corruption = new CorruptionSystem({
+      heightAt: (x, z) => this.terrain.heightAt(x, z),
+      normalAt: (x, z) => this.terrain.normalAt(x, z),
+      spline: options.corruption?.spline ?? this.terrain.stream,
+      seed: options.corruption?.seed ?? options.terrain?.seed,
+      patchRadius: options.corruption?.patchRadius,
+      triangleBudget: options.corruption?.triangleBudget,
+      counts: options.corruption?.counts,
+      sporeCount: options.corruption?.sporeCount,
+      sporeRadius: options.corruption?.sporeRadius,
+      light: options.corruption?.light,
+      // Spores drift downstream. The direction comes from the spline's tangent
+      // at the nearest point, which is a polyline scan - and it is sampled once
+      // per spore re-homing, which happens every twenty metres of walking, so
+      // the scan is a rounding error rather than a per-frame cost.
+      flowAt: (x, z) => {
+        const nearest = this.terrain.stream.distanceTo({ x, y: 0, z });
+        return this.terrain.stream.tangentAtDistance(nearest.arcLength);
+      },
+    });
+
     this.terrain.addTo(this.scene);
     this.stream.addTo(this.scene);
     this.forest.addTo(this.scene);
+    this.corruption.addTo(this.scene);
     this.sky.addTo(this.scene);
     this.lighting.addTo(this.scene);
     this.player.addTo(this.scene);
@@ -287,6 +343,7 @@ export class WorldScene {
     this.sky.update(delta);
     this.stream.update(delta, listener ?? this.player.position);
     this.forest.update(delta, listener ?? this.player.position);
+    this.corruption.update(delta, listener ?? this.player.position);
     this.player.syncMesh();
   }
 
@@ -298,6 +355,7 @@ export class WorldScene {
     this.terrain.removeFrom(this.scene);
     this.stream.removeFrom(this.scene);
     this.forest.removeFrom(this.scene);
+    this.corruption.removeFrom(this.scene);
     this.sky.removeFrom(this.scene);
     this.lighting.removeFrom(this.scene);
     this.player.removeFrom(this.scene);
@@ -307,6 +365,7 @@ export class WorldScene {
     this.terrain.dispose();
     this.stream.dispose();
     this.forest.dispose();
+    this.corruption.dispose();
     this.sky.dispose();
     this.lighting.dispose();
     this.player.dispose();

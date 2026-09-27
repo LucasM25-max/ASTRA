@@ -70,6 +70,7 @@ export const DEFAULT_FOLIAGE_MATERIAL_OPTIONS = {
   noiseSeed: 0,
   cutout: 0.42,
   tintStrength: 0.55,
+  corruptionStrength: 0.7,
 } as const;
 
 /** A single float uniform every foliage material can share. */
@@ -90,6 +91,13 @@ export interface FoliageMaterialOptions {
   cutout?: number;
   /** How strongly `aVariation` shifts the tint. */
   tintStrength?: number;
+  /**
+   * How strongly the corruption attribute desaturates and yellows the plant.
+   *
+   * Zero is a no-op, which is what keeps a forest built without a corruption
+   * field looking exactly as it did before this option existed.
+   */
+  corruptionStrength?: number;
   roughness?: number;
   metalness?: number;
 }
@@ -249,6 +257,7 @@ export function patchFoliageShader(
   shader.uniforms.uWindStrength = { value: options.windStrength ?? d.windStrength };
   shader.uniforms.uFlutterStrength = { value: options.flutterStrength ?? d.flutterStrength };
   shader.uniforms.uFoliageTint = { value: options.tintStrength };
+  shader.uniforms.uFoliageCorruption = { value: options.corruptionStrength ?? 0 };
   shader.uniforms.uFoliageCutout = { value: options.cutout };
 
   /* ---------------------------------------------------------------- vertex */
@@ -258,7 +267,9 @@ export function patchFoliageShader(
     /* glsl */ `
       #include <common>
       attribute float aVariation;
+      ${kind === 'rock' ? '' : 'attribute float corruption;'}
       varying float vAstraVariation;
+      ${kind === 'rock' ? '' : 'varying float vAstraCorruption;'}
       // Object-space position, captured BEFORE the wind moves it. The fern
       // mask has to be anchored to the frond's own shape, not to wherever the
       // wind has swung it this frame, or the mask would slide across the
@@ -305,6 +316,7 @@ export function patchFoliageShader(
     /* glsl */ `
       #include <begin_vertex>
       vAstraVariation = aVariation;
+      vAstraCorruption = corruption;
       vAstraFoliageObject = transformed;
 
       {
@@ -335,11 +347,13 @@ export function patchFoliageShader(
     /* glsl */ `
       #include <common>
       varying float vAstraVariation;
+      ${kind === 'rock' ? '' : 'varying float vAstraCorruption;'}
       varying vec3 vAstraFoliageObject;
       uniform float uNoiseSeed;
       uniform float uFoliageCutout;
       uniform float uFoliageTint;
       uniform float uFoliageHeight;
+      uniform float uFoliageCorruption;
 
       ${NOISE_GLSL}
       ${
@@ -386,6 +400,27 @@ export function patchFoliageShader(
         vec3 dry = vec3( 1.10, 0.96, 0.58 );
         vec3 tint = mix( vec3( 1.0 ), mix( fresh, dry, v ), uFoliageTint );
         diffuseColor.rgb *= tint;
+
+        ${
+          kind === 'rock'
+            ? ''
+            : `// The plan's "vegetation: desaturated, yellowed leaf color".
+        //
+        // The rock is excluded on purpose: a stone does not die, and a grey
+        // boulder in the middle of a rotten bank reads as a lighting bug. Dead
+        // wood is included - a fallen branch rots like everything else.
+        //
+        // Toward the plant's own luma and then toward a yellow cast, which is
+        // the same two steps the bark and the canopy take and with the same
+        // luma weights, so a blade of grass, a trunk and a patch of ground all
+        // go over by the same amount in the same frame.
+        float c = clamp( vAstraCorruption, 0.0, 1.0 ) * uFoliageCorruption;
+        if ( c > 0.001 ) {
+          float luma = dot( diffuseColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
+          vec3 sick = vec3( luma * 1.18, luma * 1.0, luma * 0.5 );
+          diffuseColor.rgb = mix( diffuseColor.rgb, sick, c );
+        }`
+        }
 
         ${kind === 'fern' ? `{
           // Biased before thresholding: the raw mask is near zero at the base
