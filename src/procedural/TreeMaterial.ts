@@ -84,6 +84,20 @@ export interface BarkMaterialOptions {
   windUniform?: SharedFloatUniform;
   /** Peak sway at ten metres up, in metres. Zero disables the sway. */
   windStrength?: number;
+  /**
+   * Height of this tree type, in metres.
+   *
+   * Only the leaf material uses it, and only to normalise the droop: the
+   * canopy of a 10 m oak and of a 3 m sapling must fall by comparable
+   * *fractions*, or the sapling is flattened outright while the oak barely
+   * moves. Zero disables the droop.
+   */
+  treeHeight?: number;
+  /**
+   * How far a fully corrupted canopy drops, as a fraction of the tree's own
+   * height. Zero disables the droop.
+   */
+  corruptionDroop?: number;
 }
 
 export interface LeafMaterialOptions {
@@ -103,6 +117,10 @@ export interface LeafMaterialOptions {
   windUniform?: SharedFloatUniform;
   /** Peak sway at ten metres up, in metres. Zero disables the sway. */
   windStrength?: number;
+  /** Height of this tree type, in metres. Used to normalise the droop. */
+  treeHeight?: number;
+  /** How far a fully corrupted canopy drops, as a fraction of its height. */
+  corruptionDroop?: number;
 }
 
 /** Defaults, exported so tests and the debug overlay can read them. */
@@ -115,6 +133,8 @@ export const DEFAULT_BARK_MATERIAL_OPTIONS = {
   roughness: 0.92,
   metalness: 0,
   windStrength: 0.05,
+  treeHeight: 0,
+  corruptionDroop: 0,
 } as const;
 
 export const DEFAULT_LEAF_MATERIAL_OPTIONS = {
@@ -126,6 +146,8 @@ export const DEFAULT_LEAF_MATERIAL_OPTIONS = {
   roughness: 0.68,
   metalness: 0,
   windStrength: 0.05,
+  treeHeight: 0,
+  corruptionDroop: 0.14,
 } as const;
 
 /**
@@ -261,7 +283,6 @@ export function patchBarkShader(
   shader.uniforms.uNoiseSeed = { value: options.noiseSeed };
   shader.uniforms.uWindTime = wind;
   shader.uniforms.uWindStrength = { value: options.windStrength };
-
   /* ---------------------------------------------------------------- vertex */
 
   shader.vertexShader = shader.vertexShader.replace(
@@ -269,6 +290,8 @@ export function patchBarkShader(
     /* glsl */ `
       #include <common>
       varying vec3 vAstraObject;
+      attribute float corruption;
+      varying float vAstraCorruption;
       ${NOISE_GLSL}
       ${SWAY_GLSL}
     `,
@@ -281,6 +304,7 @@ export function patchBarkShader(
     /* glsl */ `
       #include <begin_vertex>
       vAstraObject = transformed;
+      vAstraCorruption = corruption;
 
       {
         // Where this tree stands in the world. For an InstancedMesh the
@@ -308,6 +332,7 @@ export function patchBarkShader(
     /* glsl */ `
       #include <common>
       varying vec3 vAstraObject;
+      varying float vAstraCorruption;
       uniform float uPlateScale;
       uniform float uPlateDepth;
       uniform float uBarkNormalStrength;
@@ -364,6 +389,22 @@ export function patchBarkShader(
           uNoiseSeed + 7.0, 3, 2.0, 0.5, true
         );
         bark *= 1.0 + mottle * uBarkColorVariation;
+
+        // The plan's "bark color shifts to grey" on the trees nearest the
+        // stream. Desaturated toward its own luma rather than darkened: a
+        // trunk that only gets darker reads as shadow, and a trunk that reads
+        // as shadow is a lighting bug rather than a dying tree.
+        float c = clamp( vAstraCorruption, 0.0, 1.0 );
+        if ( c > 0.001 ) {
+          float luma = dot( bark, vec3( 0.2126, 0.7152, 0.0722 ) );
+          // A hair cool, so the grey is bark-grey and not concrete-grey.
+          vec3 grey = vec3( luma ) * vec3( 0.94, 0.96, 0.93 );
+          // Then a sickly cast on top, from the same family the fungus
+          // materials use, so the trunk and the shelves growing out of it are
+          // visibly the same rot rather than two unrelated looks.
+          grey = mix( grey, vec3( 0.30, 0.34, 0.20 ), c * 0.45 );
+          bark = mix( bark, grey, c * 0.85 );
+        }
 
         diffuseColor.rgb *= bark;
       }
@@ -429,6 +470,12 @@ export function patchLeafShader(
   shader.uniforms.uNoiseSeed = { value: options.noiseSeed };
   shader.uniforms.uWindTime = wind;
   shader.uniforms.uWindStrength = { value: options.windStrength };
+  // These two are read with `?? 0` rather than taken raw: a caller spreading
+  // `{ treeHeight: undefined }` over the defaults would otherwise put
+  // `undefined` into the uniform, and `clamp( y / undefined )` is a NaN that
+  // silently deletes the entire canopy.
+  shader.uniforms.uTreeHeight = { value: options.treeHeight ?? 0 };
+  shader.uniforms.uTreeDroop = { value: options.corruptionDroop ?? 0 };
 
   /* ---------------------------------------------------------------- vertex */
 
@@ -440,6 +487,10 @@ export function patchLeafShader(
       #include <common>
       varying vec3 vAstraObject;
       varying vec3 vAstraObjectNormal;
+      attribute float corruption;
+      varying float vAstraCorruption;
+      uniform float uTreeHeight;
+      uniform float uTreeDroop;
       ${NOISE_GLSL}
       ${SWAY_GLSL}
     `,
@@ -451,6 +502,39 @@ export function patchLeafShader(
       #include <begin_vertex>
       vAstraObject = transformed;
       vAstraObjectNormal = objectNormal;
+      vAstraCorruption = corruption;
+
+      {
+        // The canopy droops: the plan's "canopy droops (vertex displacement)"
+        // on the trees nearest the stream.
+        //
+        // The weight is QUADRATIC in the height above the tree's own base, so
+        // the trunk does not move at all and only the crown falls. A linear
+        // weight bows the whole tree, and a tree that bows from its roots reads
+        // as a bendy prop rather than as a dying one.
+        //
+        // uTreeHeight does two jobs. It normalises the SHAPE of the fall, so
+        // the weight is one at every tree's own crown whatever its size, and it
+        // scales the MAGNITUDE, so the fall is a fraction of this tree's height
+        // rather than a fixed number of metres. Without it a 10 m oak and a 3 m
+        // sapling both sink 0.14 m, which flattens the sapling and leaves the
+        // oak looking untouched. With it the oak loses 1.4 m and the sapling
+        // 0.42 m, and both read as the same wilting.
+        //
+        // The height is normalised by uTreeHeight rather than by the geometry's
+        // bounding box, because the material is shared by every tree of a type
+        // and the shader has no access to which type it is drawing.
+        float c = clamp( corruption, 0.0, 1.0 );
+        if ( c > 0.001 && uTreeDroop > 0.0 ) {
+          float h = clamp( transformed.y / max( uTreeHeight, 1e-4 ), 0.0, 1.0 );
+          float fall = c * uTreeDroop * uTreeHeight * h * h;
+          transformed.y -= fall;
+          // And the crown closes up as it falls, so the silhouette narrows. A
+          // crown that only sinks keeps its spread and reads as a smaller tree
+          // rather than a wilting one.
+          transformed.xz *= 1.0 - c * 0.12 * h * h;
+        }
+      }
 
       {
         vec3 instanceOrigin = modelMatrix[ 3 ].xyz;
@@ -472,6 +556,7 @@ export function patchLeafShader(
       #include <common>
       varying vec3 vAstraObject;
       varying vec3 vAstraObjectNormal;
+      varying float vAstraCorruption;
       uniform float uClusterScale;
       uniform float uLeafCutout;
       uniform float uLeafSssStrength;
@@ -519,6 +604,23 @@ export function patchLeafShader(
         // around with the tree.
         float up = clamp( vAstraObjectNormal.y * 0.5 + 0.5, 0.0, 1.0 );
         diffuseColor.rgb *= 0.72 + 0.28 * up;
+
+        // The plan's "vegetation: desaturated, yellowed leaf color".
+        //
+        // Toward the leaf's own luma first and then toward a yellow cast, for
+        // the same reason the bark goes toward its own luma: a crown that only
+        // gets darker reads as unlit, and a crown that only gets more saturated
+        // reads as a different tree. What has to read is the same tree going
+        // over.
+        float c = clamp( vAstraCorruption, 0.0, 1.0 );
+        if ( c > 0.001 ) {
+          float luma = dot( diffuseColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
+          vec3 yellowed = vec3( luma * 1.22, luma * 1.02, luma * 0.42 );
+          // A grey-green at the far end, so a fully corrupted crown is not
+          // merely yellow but visibly unwell.
+          yellowed = mix( yellowed, vec3( luma * 0.62, luma * 0.70, luma * 0.40 ), c * 0.6 );
+          diffuseColor.rgb = mix( diffuseColor.rgb, yellowed, c * 0.75 );
+        }
       }
     `,
   );
