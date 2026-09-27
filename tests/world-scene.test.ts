@@ -87,12 +87,13 @@ describe('WorldScene', () => {
   });
 
   it('makes the valley mist thicker than the open ground', async () => {
-    await buildScene();
+    const { world } = await buildScene();
 
     // The plan's "ground-level fog in stream valley (denser near water)". In the
     // stream bed the density is multiplied by the valley boost, and the mist is
     // also lifted by the height falloff - so standing in the water the player is
     // in a bank of it, and on a ridge the same distance is thin air.
+    //
     // Read the REAL mask, not a hand-rolled copy of the formula. A mask that
     // ramps the wrong way - densest on the ridge, nothing in the stream bed -
     // passes every test that checks the fog formula and fails only on screen.
@@ -101,29 +102,62 @@ describe('WorldScene', () => {
     const res = mask.image.width;
     const at = (i: number, j: number) => data[(j * res + i) * 4] / 255;
 
-    // Walk out from the stream along +x at the mask's middle row and find where
-    // the valley weight actually falls away.
-    const row = Math.floor(res / 2);
-    let firstZero = res;
-    for (let i = 0; i < res; i++) {
+    // Find where the mist actually is. The stream is a diagonal, so it does NOT
+    // pass through the middle of the mask - assuming it does is how this test
+    // came to assert the wrong thing.
+    let bestI = 0;
+    let bestJ = 0;
+    let best = -1;
+    for (let j = 0; j < res; j++) {
+      for (let i = 0; i < res; i++) {
+        if (at(i, j) > best) {
+          best = at(i, j);
+          bestI = i;
+          bestJ = j;
+        }
+      }
+    }
+    // Somewhere in the mask is standing water.
+    expect(best).toBe(1);
+
+    // Walking out from the water along +x and -x on that row, the mist thins to
+    // nothing monotonically, and it is gone before the edge of the box - if it
+    // were not, the fog would show the world's edge as a wall.
+    const row = bestJ;
+    let firstZeroRight = res;
+    for (let i = bestI; i < res; i++) {
       if (at(i, row) === 0) {
-        firstZero = i;
+        firstZeroRight = i;
         break;
       }
     }
-    const streamColumn = Math.floor(res / 2);
-
-    // The mist is thick in the bed...
-    expect(at(streamColumn, row)).toBeGreaterThan(0.7);
-    // ...and gone well before the edge of the mask's box.
-    expect(firstZero).toBeGreaterThan(streamColumn);
-    expect(firstZero).toBeLessThan(res);
-    // And the transition is monotonic, not a step.
-    let previous = 2;
-    for (let i = streamColumn; i <= firstZero; i++) {
-      expect(at(i, row)).toBeLessThanOrEqual(previous + 1e-6);
-      previous = at(i, row);
+    let firstZeroLeft = -1;
+    for (let i = bestI; i >= 0; i--) {
+      if (at(i, row) === 0) {
+        firstZeroLeft = i;
+        break;
+      }
     }
+    expect(firstZeroRight).toBeGreaterThan(bestI);
+    expect(firstZeroRight).toBeLessThan(res);
+    expect(firstZeroLeft).toBeLessThan(bestI);
+    expect(firstZeroLeft).toBeGreaterThan(-1);
+    for (let i = bestI; i < firstZeroRight; i++) {
+      expect(at(i + 1, row)).toBeLessThanOrEqual(at(i, row) + 1e-6);
+    }
+    for (let i = bestI; i > firstZeroLeft; i--) {
+      expect(at(i - 1, row)).toBeLessThanOrEqual(at(i, row) + 1e-6);
+    }
+
+    // And the mist is LOCAL. Most of a 500 m box is open ground with no fog
+    // boost at all; if the red channel were near 1 everywhere the valley would
+    // be a white-out rather than a bank of mist in the stream bed.
+    let misty = 0;
+    for (let j = 0; j < res; j++) {
+      for (let i = 0; i < res; i++) if (at(i, j) > 0.5) misty++;
+    }
+    expect(misty).toBeGreaterThan(0);
+    expect(misty).toBeLessThan(res * res * 0.25);
 
     // The same distance is thin air up on a ridge, because of the height term.
     const inValley = 1 - Math.exp(-DEFAULT_FOG_SHADER.density * (1 + DEFAULT_FOG_SHADER.valleyBoost) * 60);
