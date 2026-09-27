@@ -316,7 +316,7 @@ __ASTRA__.physics.stepCount            // fixed steps taken so far
 - **Boot is async.** Rapier's WASM must be initialised before a `World` can
   exist, so `main.ts` exports a `ready` promise that tests await. `index.html`
   needs no change — the module auto-starts.
-- 794 tests across 32 files, including a jsdom integration test that runs the
+- 795 tests across 32 files, including a jsdom integration test that runs the
   real `main.ts` bootstrap end to end and walks, runs, jumps, orbits and dilates
   through it.
 - **The terrain collider is a triangle mesh, not a Rapier heightfield.**
