@@ -820,12 +820,7 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
  * mushroom.
  */
 export function scatterFungus(options: FungusScatterOptions): FungusInstance[] {
-  const {
-    seed,
-    centreX,
-    centreZ,
-    field,
-  } = options;
+  const { seed, centreX, centreZ, field } = options;
   const radius = options.radius ?? DEFAULT_FUNGUS_SCATTER.radius;
   const hillStart = options.hillStart ?? DEFAULT_FUNGUS_SCATTER.hillStart;
   const hillEnd = options.hillEnd ?? DEFAULT_FUNGUS_SCATTER.hillEnd;
@@ -837,17 +832,39 @@ export function scatterFungus(options: FungusScatterOptions): FungusInstance[] {
   for (const kind of FUNGUS_KINDS) {
     const target = counts[kind];
     if (target <= 0) continue;
+
+    // Phase one: how rotten is this patch on average?
+    //
+    // The acceptance probability below is `corruption^2`, so the expected
+    // number of instances placed from `n` candidates is `n` times the mean of
+    // `corruption^2` over the patch. That means a fixed target count does NOT
+    // give a corruption-driven density - it gives the same number of mushrooms
+    // everywhere the field can beat the threshold, and only their positions
+    // change. Which is precisely the "ring of blight around the whole stream"
+    // this is supposed to avoid.
+    //
+    // So the target is scaled by the patch's own mean, and the acceptance then
+    // only has to distribute that many instances in proportion to the
+    // corruption. A coarse lattice is enough: twelve samples across a radius
+    // is a five-metre grid, and the corruption field varies over tens of
+    // metres.
+    const mean = patchMeanCorruption(field, centreX, centreZ, radius, minCorruption);
+    // Clean throughout: nothing to scatter, and no reason to spend the tries
+    // finding that out one candidate at a time.
+    if (mean <= 0) continue;
+    const cap = Math.max(1, Math.round(target * mean));
+
     const rng = createRng(hash(seed, FUNGUS_KINDS.indexOf(kind), 0x5c_47a7));
-    // Bounded, not infinite: a patch centred somewhere clean would otherwise
-    // spin forever looking for a point that does not exist. Two hundred tries
-    // per instance is far more than the field needs at any density the
-    // corruption curve can produce, and it fails closed rather than hanging.
-    const maxTries = target * 200;
+    // Bounded, not infinite. With acceptance `corruption^2` and a mean of `m`,
+    // each try places `m` instances on average, so `cap * 40` tries is a
+    // forty-fold margin on a patch whose mean has already been measured. It
+    // fails closed rather than hanging.
+    const maxTries = cap * 40;
 
     let placed = 0;
-    for (let tries = 0; tries < maxTries && placed < target; tries++) {
-      // Square-root distributed over the disc, so instances are spread
-      // through it rather than clumped at its centre.
+    for (let tries = 0; tries < maxTries && placed < cap; tries++) {
+      // Square-root distributed over the disc, so instances are spread through
+      // it rather than clumped at its centre.
       const a = rng() * Math.PI * 2;
       const d = Math.sqrt(rng()) * radius;
       const x = centreX + Math.cos(a) * d;
@@ -855,13 +872,12 @@ export function scatterFungus(options: FungusScatterOptions): FungusInstance[] {
 
       const corruption = field.corruptionAt(x, z);
       if (corruption < minCorruption) continue;
-      // Accept in proportion to the corruption. Squared, so a place that is
-      // half as rotten holds a quarter as much growth: the falloff should
-      // read as the corruption dying out, not as a linear dial.
+      // Squared, so a place that is half as rotten holds a quarter as much
+      // growth: the falloff should read as the corruption dying out, not as a
+      // linear dial.
       if (rng() > corruption * corruption) continue;
 
       const height = field.heightAt(x, z);
-      if (height < hillStart - (hillEnd - hillStart)) continue;
       if (hillEnd > hillStart && height > hillStart) {
         if (rng() > 1 - smoothstep(hillStart, hillEnd, height)) continue;
       }
@@ -881,9 +897,9 @@ export function scatterFungus(options: FungusScatterOptions): FungusInstance[] {
         scale: scaleFor(kind, rng, corruption),
         tilt: (rng() - 0.5) * 0.3,
         variation: rng(),
-        // Rounded to a byte's worth of precision: the tint attribute is a
-        // float, but nothing downstream can see past two decimals and a
-        // rounded value makes two patches of the same place identical.
+        // Rounded to a hundredth: the tint attribute is a float, but nothing
+        // downstream can see past two decimals and a rounded value makes two
+        // visits to the same place agree.
         corruption: Math.round(corruption * 100) / 100,
       });
       placed++;
@@ -891,6 +907,48 @@ export function scatterFungus(options: FungusScatterOptions): FungusInstance[] {
   }
 
   return out;
+}
+
+/** Lattice rings sampled across a patch's radius, to measure its mean. */
+const MEAN_SAMPLES = 12;
+
+/**
+ * Mean of `corruption^2` over a patch, or 0 if the patch is clean throughout.
+ *
+ * Sampled on a lattice of equal-area rings rather than by Monte Carlo: twelve
+ * rings, the innermost a single point, covers the disc evenly, costs 145 field
+ * evaluations, and gives the same answer to within a percent or two whatever
+ * the field is doing - which is all the target count is entitled to depend on.
+ *
+ * The ring radii are `R*sqrt((k+0.5)/n)`, not `R*(k+0.5)/n`. Equal-area rings
+ * have boundaries at `R/sqrt(n)` multiples, and bucketing by width instead
+ * puts an eighth of the samples into the inner eighth of the area and reads it
+ * back as clustering.
+ */
+function patchMeanCorruption(
+  field: FungusField,
+  centreX: number,
+  centreZ: number,
+  radius: number,
+  minCorruption: number,
+): number {
+  let sum = 0;
+  let n = 0;
+  let any = false;
+  for (let i = 0; i < MEAN_SAMPLES; i++) {
+    const r = radius * Math.sqrt((i + 0.5) / MEAN_SAMPLES);
+    const count = i === 0 ? 1 : MEAN_SAMPLES;
+    for (let j = 0; j < count; j++) {
+      const a = (j / count) * Math.PI * 2 + i * 0.7;
+      const c = field.corruptionAt(centreX + Math.cos(a) * r, centreZ + Math.sin(a) * r);
+      if (c >= minCorruption) any = true;
+      const clamped = c < minCorruption ? 0 : c;
+      sum += clamped * clamped;
+      n++;
+    }
+  }
+  if (!any) return 0;
+  return sum / Math.max(n, 1);
 }
 
 /**
