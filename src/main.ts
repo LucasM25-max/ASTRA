@@ -49,7 +49,6 @@ import { PhysicsWorld } from './physics/PhysicsWorld';
 import { MovementController } from './player/MovementController';
 import { PLAYER_HALF_HEIGHT, type Player } from './player/Player';
 import { WorldScene } from './world/WorldScene';
-import { DEFAULT_FOG_FAR, DEFAULT_FOG_NEAR } from './world/WorldScene';
 
 /** Console handle: `window.__ASTRA__.timeController.gameSpeed`, and so on. */
 export interface AstraDebugHandle {
@@ -236,8 +235,20 @@ async function boot(): Promise<void> {
       return;
     }
 
-    // The world: ground plane, sky dome, light rig, depth fog and the player.
+    // The world: ground plane, sky dome, light rig and the player. No depth fog -
+    // that is the render pipeline's atmosphere pass, wired just below.
     const worldScene = new WorldScene({ scene: renderPipeline.scene, physics });
+
+    // The atmosphere pass needs a top-down map of the world - where the valley
+    // floor is and where the rot is - and the world has to exist before that map
+    // can be built. This is the one piece of the post chain that cannot be a
+    // constructor option.
+    renderPipeline.setAtmosphereMask(worldScene.buildAtmosphereMask(), 250);
+
+    // The light shafts radiate from the sun, so the pass needs to know where it
+    // is. Off screen it draws nothing, which is the correct behaviour and needs
+    // no special case anywhere.
+    renderPipeline.setSunPosition(worldScene.lighting.sun.position.clone());
 
     // The player's movement: WASD, walk/run, jump, gravity and landing.
     //
@@ -338,6 +349,10 @@ async function boot(): Promise<void> {
       // come from where the player is looking, and the camera is what follows
       // the player through the world.
       worldScene.update(timeController.getDelta(), renderPipeline.camera.position);
+      // The post chain runs on game time like everything else, so the fog's
+      // drift and the glow's flicker stop when the Active Encounter dilates time
+      // in Phase 3.
+      renderPipeline.updatePost(timeController.getDelta());
       renderPipeline.render();
       // Last, so the renderer counters it reports describe the frame that has
       // just been drawn rather than the one before it.
@@ -375,7 +390,7 @@ async function boot(): Promise<void> {
     console.info(
       `[ASTRA] booted - scene=${sceneManager.current} speed=${timeController.gameSpeed} ` +
         `canvas=${renderPipeline.size.width}x${renderPipeline.size.height} ` +
-        `ground=${worldScene.terrain.sizeMetres}m fog=${DEFAULT_FOG_NEAR}-${DEFAULT_FOG_FAR}m ` +
+        `ground=${worldScene.terrain.sizeMetres}m ` +
         `player=${worldScene.player.height}m@${worldScene.physics.timestep.toFixed(4)}s`,
     );
   } catch (error) {

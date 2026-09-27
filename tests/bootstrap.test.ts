@@ -53,6 +53,15 @@ vi.mock('../src/renderer/RenderPipeline', async (importOriginal) => {
     render = vi.fn();
     resize = vi.fn();
     dispose = vi.fn();
+    // The Step 2.5 surface. The stub does not build the real chain - jsdom has
+    // no WebGL - but `main.ts` calls into it on every frame, so the methods have
+    // to exist or the boot dies with a TypeError that has nothing to do with
+    // anything actually broken.
+    post = null;
+    setAtmosphereMask = vi.fn();
+    setSunPosition = vi.fn();
+    setPostProcessingEnabled = vi.fn();
+    updatePost = vi.fn();
   }
   return { RenderPipeline: RenderPipelineStub };
 });
@@ -111,7 +120,9 @@ describe('bootstrap (src/main.ts)', () => {
     // Step 1.2: the world is built and attached to the renderer's scene.
     expect(handle?.worldScene.isDisposed).toBe(false);
     expect(handle?.worldScene.terrain.sizeMetres).toBe(500);
-    expect(handle?.worldScene.fog).not.toBeNull();
+    // Step 2.5: the depth cue is the atmosphere pass's, so there is no linear
+    // `Fog` on the scene. A `Fog` here would mean the world was fogged twice.
+    expect(handle?.worldScene.fog).toBeNull();
     expect(handle?.renderPipeline.scene.children).toContain(handle?.worldScene.sky.mesh);
   });
 

@@ -13,8 +13,10 @@ import { EventBus } from '../src/core/EventBus';
 
 // `vi.mock` factories are hoisted, so both the stub and the recorder it writes
 // into have to come from `vi.hoisted`.
-const { rendererInstances, RendererStub } = vi.hoisted(() => {
+const { rendererInstances, RendererStub, stubFlags } = vi.hoisted(() => {
   const rendererInstances: RendererStub[] = [];
+  /** Set by a test to make the next constructed renderer throw on first use. */
+  const stubFlags = { failConstruction: false };
 
   class RendererStub {
     readonly canvas: unknown;
@@ -26,9 +28,46 @@ const { rendererInstances, RendererStub } = vi.hoisted(() => {
     renderCalls = 0;
     disposed = false;
 
+    // Everything `EffectComposer` and its passes read off the renderer. Without
+    // these the post chain cannot be constructed under jsdom, and every test in
+    // this file would silently take the "no post-processing" fallback path -
+    // which would make the whole suite green while testing nothing.
+    // `shadowMap` defaults to `enabled: false` on a real WebGLRenderer. The stub
+    // has to default the same way or a test asserting the pipeline turns shadows
+    // on would pass even if the pipeline never touched it.
+    shadowMap = { enabled: false, type: 0 };
+    toneMapping = 0;
+    toneMappingExposure = 1;
+    outputColorSpace = 'srgb';
+    autoClear = true;
+    autoClearColor = true;
+    autoClearDepth = true;
+    autoClearStencil = true;
+    /** Set by a test that wants construction to fail. */
+    failOnGetPixelRatio = false;
+
     constructor(options: { canvas: unknown }) {
       this.canvas = options.canvas;
       rendererInstances.push(this);
+    }
+
+    getPixelRatio(): number {
+      if (this.failOnGetPixelRatio || stubFlags.failConstruction) {
+        throw new Error('no pixel ratio');
+      }
+      return this.pixelRatio;
+    }
+
+    getDrawingBufferSize(target: { width: number; height: number }): { width: number; height: number } {
+      target.width = this.drawingBufferSize.width;
+      target.height = this.drawingBufferSize.height;
+      return target;
+    }
+
+    getSize(target: { width: number; height: number }): { width: number; height: number } {
+      target.width = this.drawingBufferSize.width;
+      target.height = this.drawingBufferSize.height;
+      return target;
     }
 
     setClearColor(color: { getHex(): number }, alpha: number): void {
@@ -49,12 +88,35 @@ const { rendererInstances, RendererStub } = vi.hoisted(() => {
       this.renderCalls += 1;
     }
 
+    setRenderTarget(): void {}
+
+    getRenderTarget(): unknown {
+      return null;
+    }
+
+    clear(): void {}
+
+    getClearColor(target: { set(hex: number): void }): { set(hex: number): void } {
+      target.set(this.clearColorHex);
+      return target;
+    }
+
+    getClearAlpha(): number {
+      return this.clearAlpha;
+    }
+
+    clearColor(): void {}
+
+    clearDepth(): void {}
+
+    clearStencil(): void {}
+
     dispose(): void {
       this.disposed = true;
     }
   }
 
-  return { rendererInstances, RendererStub };
+  return { rendererInstances, RendererStub, stubFlags };
 });
 
 vi.mock('three', async (importOriginal) => {
@@ -204,8 +266,77 @@ describe('RenderPipeline', () => {
     const pipeline = new RenderPipeline(canvas, { eventBus: bus });
     pipeline.render();
 
-    expect(rendererInstances[0].renderCalls).toBe(1);
+    // With the chain live the scene is drawn into the composer's target and then
+    // graded, so the renderer is called more than once per frame - once for the
+    // scene and once per full-screen pass. What matters is that it is called at
+    // all, and that the drawing buffer is the canvas size.
+    expect(rendererInstances[0].renderCalls).toBeGreaterThanOrEqual(1);
     expect(rendererInstances[0].drawingBufferSize).toEqual({ width: 800, height: 600 });
+  });
+
+  it('turns shadows on, because a casting light is invisible until it does', () => {
+    const pipeline = new RenderPipeline(canvas, { eventBus: bus });
+
+    // `shadowMap.enabled` defaults to false on WebGLRenderer. The whole Step 2.5
+    // light rig - the 220 m camera-following box, the 2048 map, the 0.06 normal
+    // bias - is invisible on screen until this is set, and nothing else sets it,
+    // so this assertion is the only thing standing between a correct light rig
+    // and a world with no shadows at all.
+    expect(rendererInstances[0].shadowMap.enabled).toBe(true);
+    // PCFSoft (2), not PCF (1) or Basic (0): the box is 220 m across at 2048
+    // texels, and a hard filter staircases every trunk.
+    expect(rendererInstances[0].shadowMap.type).toBe(2);
+
+    pipeline.dispose();
+  });
+
+  it('renders exactly once per frame with the chain switched off', () => {
+    const pipeline = new RenderPipeline(canvas, {
+      eventBus: bus,
+      postProcessing: { enabled: false },
+    });
+    pipeline.render();
+
+    expect(rendererInstances[0].renderCalls).toBe(1);
+    expect(pipeline.post).toBeNull();
+  });
+
+  it('owns the scene fog: none with the chain, linear without it', () => {
+    // Exactly one fog in the scene, ever. With the chain live the atmosphere pass
+    // does the fogging from the depth buffer; Three's own linear fog has to be
+    // off or every pixel is fogged twice and the horizon comes in at half the
+    // distance. Without the chain there is no depth cue at all without it.
+    const graded = new RenderPipeline(canvas, { eventBus: bus });
+    expect(graded.post).not.toBeNull();
+    expect(graded.scene.fog).toBeNull();
+
+    const raw = new RenderPipeline(canvas, {
+      eventBus: bus,
+      postProcessing: { enabled: false },
+    });
+    expect(raw.scene.fog).not.toBeNull();
+  });
+
+  it('degrades to a plain render when the chain cannot be built', () => {
+    // A context that cannot give the composer what it needs must not take the
+    // boot down with it. The failure is logged, not swallowed.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    rendererInstances.length = 0;
+    stubFlags.failConstruction = true;
+
+    const pipeline = new RenderPipeline(canvas, { eventBus: bus });
+    expect(pipeline.post).toBeNull();
+    // The fallback fog goes back on, because there is no atmosphere pass to do it.
+    expect(pipeline.scene.fog).not.toBeNull();
+    expect(warn).toHaveBeenCalled();
+
+    // And it still draws.
+    const before = rendererInstances[0].renderCalls;
+    pipeline.render();
+    expect(rendererInstances[0].renderCalls).toBe(before + 1);
+
+    warn.mockRestore();
+    stubFlags.failConstruction = false;
   });
 
   it('can change the clear colour at runtime', () => {

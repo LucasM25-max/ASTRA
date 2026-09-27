@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Fog, Scene } from 'three';
+import { Scene } from 'three';
 import { PhysicsWorld } from '../src/physics/PhysicsWorld';
 import {
   PLAYER_HALF_HEIGHT,
@@ -7,14 +7,9 @@ import {
   PLAYER_RADIUS,
   PLAYER_SPAWN,
 } from '../src/player/Player';
-import {
-  DEFAULT_FOG_COLOR,
-  DEFAULT_FOG_FAR,
-  DEFAULT_FOG_NEAR,
-  WorldScene,
-  type WorldSceneOptions,
-} from '../src/world/WorldScene';
+import { WorldScene, type WorldSceneOptions } from '../src/world/WorldScene';
 import { GROUND_KINDS } from '../src/world/CorruptionSystem';
+import { DEFAULT_FOG_SHADER } from '../src/renderer/PostProcessing';
 
 const FIXED_STEP = 1 / 60;
 
@@ -50,34 +45,37 @@ describe('WorldScene', () => {
     expect(scene.getObjectByName('player')).toBe(world.player.mesh);
   });
 
-  it('adds linear fog for depth', async () => {
-    const { world } = await buildScene();
+  it('leaves the fog to the atmosphere pass', async () => {
+    // The depth cue is no longer a linear `Fog`. The render pipeline's atmosphere
+    // pass does it from the depth buffer - height falloff, a valley floor, and a
+    // corruption tint, none of which a distance fog can express - so a `Fog` on
+    // the scene would fog every pixel twice and pull the horizon in by half.
+    const { scene, world } = await buildScene();
 
-    expect(world.fog).toBeInstanceOf(Fog);
-    expect(world.fog?.near).toBe(DEFAULT_FOG_NEAR);
-    expect(world.fog?.far).toBe(DEFAULT_FOG_FAR);
-    expect(world.fog?.color.getHex()).toBe(DEFAULT_FOG_COLOR);
+    expect(scene.fog).toBeNull();
+    expect(world.fog).toBeNull();
+    expect(world.terrain.sizeMetres).toBe(500);
   });
 
-  it('tunes the fog so the 500m terrain dissolves instead of ending', async () => {
-    const { world } = await buildScene();
+  it('tunes the atmosphere so the 500m terrain dissolves instead of ending', async () => {
+    await buildScene();
 
-    // Wide fog, as decided for Step 2.1: the ground under the player stays
-    // crisp, and the distance dissolves rather than showing a hard edge. With
-    // the camera near the centre of a 500m terrain the far rim sits about
-    // 250m away, so `far` has to reach well past that for the effect to work.
+    // The same requirement Step 2.1's wide fog was tuned for, now expressed as
+    // the atmosphere pass's exponential density: the ground under the player
+    // stays crisp, and the distance dissolves rather than showing a hard edge.
+    // With the camera near the centre of a 500m terrain the far rim sits about
+    // 250m away, so the density has to reach well past that.
     const fogAt = (distance: number): number => {
-      const { near, far } = world.fog as Fog;
-      return Math.min(Math.max((distance - near) / (far - near), 0), 1);
+      // Ground level, away from the valley, so this is the base density alone.
+      return 1 - Math.exp(-DEFAULT_FOG_SHADER.density * distance);
     };
 
     expect(fogAt(0)).toBe(0); // the ground at the player's feet is unfogged
-    expect(fogAt(50)).toBe(0); // ...and so is the ground 50m out
-    expect(fogAt(80)).toBe(0); // haze starts exactly at the near plane
-    expect(fogAt(200)).toBeGreaterThan(0.2); // the distance is visibly hazy
-    expect(fogAt(250)).toBeGreaterThan(0.4); // the far rim recedes
+    expect(fogAt(50)).toBeLessThan(0.3); // ...and so is the ground 50m out
+    expect(fogAt(200)).toBeGreaterThan(0.3); // the distance is visibly hazy
+    expect(fogAt(250)).toBeGreaterThan(0.35); // the far rim recedes
     expect(fogAt(250)).toBeLessThan(0.8); // ...but stays readable
-    expect(fogAt(400)).toBe(1); // and dissolves completely past it
+    expect(fogAt(400)).toBeGreaterThan(0.85); // and nearly dissolves past it
 
     // Monotonic: fog never un-fogs as distance grows.
     let previous = -1;
@@ -88,12 +86,65 @@ describe('WorldScene', () => {
     }
   });
 
-  it('accepts fog overrides', async () => {
+  it('makes the valley mist thicker than the open ground', async () => {
+    await buildScene();
+
+    // The plan's "ground-level fog in stream valley (denser near water)". In the
+    // stream bed the density is multiplied by the valley boost, and the mist is
+    // also lifted by the height falloff - so standing in the water the player is
+    // in a bank of it, and on a ridge the same distance is thin air.
+    // Read the REAL mask, not a hand-rolled copy of the formula. A mask that
+    // ramps the wrong way - densest on the ridge, nothing in the stream bed -
+    // passes every test that checks the fog formula and fails only on screen.
+    const mask = world.buildAtmosphereMask();
+    const data = mask.image.data as Uint8Array;
+    const res = mask.image.width;
+    const at = (i: number, j: number) => data[(j * res + i) * 4] / 255;
+
+    // Walk out from the stream along +x at the mask's middle row and find where
+    // the valley weight actually falls away.
+    const row = Math.floor(res / 2);
+    let firstZero = res;
+    for (let i = 0; i < res; i++) {
+      if (at(i, row) === 0) {
+        firstZero = i;
+        break;
+      }
+    }
+    const streamColumn = Math.floor(res / 2);
+
+    // The mist is thick in the bed...
+    expect(at(streamColumn, row)).toBeGreaterThan(0.7);
+    // ...and gone well before the edge of the mask's box.
+    expect(firstZero).toBeGreaterThan(streamColumn);
+    expect(firstZero).toBeLessThan(res);
+    // And the transition is monotonic, not a step.
+    let previous = 2;
+    for (let i = streamColumn; i <= firstZero; i++) {
+      expect(at(i, row)).toBeLessThanOrEqual(previous + 1e-6);
+      previous = at(i, row);
+    }
+
+    // The same distance is thin air up on a ridge, because of the height term.
+    const inValley = 1 - Math.exp(-DEFAULT_FOG_SHADER.density * (1 + DEFAULT_FOG_SHADER.valleyBoost) * 60);
+    const onRidge =
+      1 -
+      Math.exp(
+        -DEFAULT_FOG_SHADER.density *
+          Math.exp(-40 / DEFAULT_FOG_SHADER.heightFalloff) *
+          60,
+      );
+    expect(inValley).toBeGreaterThan(0.7);
+    expect(onRidge).toBeLessThan(0.12);
+    expect(inValley).toBeGreaterThan(onRidge * 8);
+  });
+
+  it('ignores the retired linear-fog option', async () => {
+    // The option is kept so an existing caller does not break at the type level,
+    // but the pipeline owns the fog now and a caller's numbers would be lost.
     const { world } = await buildScene({ fog: { near: 1, far: 2, color: 0x123456 } });
 
-    expect(world.fog?.near).toBe(1);
-    expect(world.fog?.far).toBe(2);
-    expect(world.fog?.color.getHex()).toBe(0x123456);
+    expect(world.fog).toBeNull();
   });
 
   it('spawns the player standing on the terrain at the spec XZ', async () => {

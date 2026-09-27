@@ -34,8 +34,9 @@
  * =============================================================================
  */
 
-import { Fog, type Scene } from 'three';
+import { DataTexture, Fog, type Scene } from 'three';
 import { LightingSystem } from '../renderer/LightingSystem';
+import { buildAtmosphereMask } from '../renderer/PostProcessing';
 import { Forest, type ForestOptions } from './Forest';
 import {
   CorruptionSystem,
@@ -60,6 +61,16 @@ import type { WaterAudioOptions as StreamAudioOptions } from '../audio/WaterAudi
  * while still dissolving the terrain's far edge into the haze, and Step 2.5
  * replaces this linear fog with volumetric ground fog in the stream valley.
  */
+/**
+ * How far from the water the valley mist is felt, in metres.
+ *
+ * Wide on purpose. The stream is a valley, not a channel - the ground either
+ * side of it is low, and a mist that stopped at the water's edge would read as a
+ * rendered plane lying on the surface rather than as air.
+ */
+export const DEFAULT_FOG_VALLEY_WIDTH = 38;
+
+/** Kept for callers that still read the old linear-fog numbers. */
 export const DEFAULT_FOG_NEAR = 80;
 export const DEFAULT_FOG_FAR = 400;
 
@@ -71,6 +82,18 @@ export interface WorldSceneOptions {
   scene: Scene;
   /** An initialised physics world. Build it with `PhysicsWorld.create()`. */
   physics: PhysicsWorld;
+  /**
+   * Unused, and ignored.
+   *
+   * The render pipeline owns the scene's fog now. With the post chain live the
+   * atmosphere pass does the fogging - from the depth buffer, with a height
+   * falloff, a valley floor and a corruption tint, none of which a linear
+   * distance fog can express - so Three's own linear fog has to be off or every
+   * pixel is fogged twice and the horizon comes in at half the distance. With the
+   * chain off the pipeline installs a plain linear fog as the fallback.
+   *
+   * The option is kept so an existing caller does not break at the type level.
+   */
   fog?: {
     near?: number;
     far?: number;
@@ -186,10 +209,6 @@ export class WorldScene {
     this.scene = options.scene;
     this.physics = options.physics;
 
-    const fogColor = options.fog?.color ?? DEFAULT_FOG_COLOR;
-    const fogNear = options.fog?.near ?? DEFAULT_FOG_NEAR;
-    const fogFar = options.fog?.far ?? DEFAULT_FOG_FAR;
-
     this.terrain = new Terrain({
       size: options.terrain?.size,
       resolution: options.terrain?.resolution,
@@ -270,6 +289,19 @@ export class WorldScene {
       },
     });
 
+    // The rot's light flickers. The baseline is read live from the corruption
+    // system rather than captured once, so the glow keeps fading in and out with
+    // the corruption underfoot while it flickers - two systems modulating one
+    // quantity through two different fields, rather than fighting over one.
+    this.lighting.flicker(this.corruption.light, {
+      baseline: () => this.corruption.currentGlowIntensity,
+      // Slow and shallow. A fast, deep flicker reads as a broken bulb; the rot's
+      // glow should breathe, not strobe.
+      rate: 1.7,
+      secondary: 4.3,
+      depth: 0.22,
+    });
+
     this.terrain.addTo(this.scene);
     this.stream.addTo(this.scene);
     this.forest.addTo(this.scene);
@@ -284,9 +316,7 @@ export class WorldScene {
     // surface - there is no second heightmap to drift out of sync.
     this.physics.createTerrainCollider(this.terrain.collisionData());
 
-    // Linear fog: the cheapest depth cue that works, and the one Step 2.5
-    // replaces with volumetric ground fog in the stream valley.
-    this.scene.fog = new Fog(fogColor, fogNear, fogFar);
+    // No fog here - see the `fog` option above. The render pipeline owns it.
   }
 
   /** The scene's fog, or `null` once disposed. */
@@ -341,10 +371,43 @@ export class WorldScene {
 
     this.elapsed += delta;
     this.sky.update(delta);
-    this.stream.update(delta, listener ?? this.player.position);
-    this.forest.update(delta, listener ?? this.player.position);
-    this.corruption.update(delta, listener ?? this.player.position);
+    // The light rig runs on the listener, not the player: the shadow box has to
+    // sit under the camera, and the camera is what the player actually looks
+    // through. Passing the player instead would leave the shadows a third-person
+    // arm's length behind the view.
+    const focus = listener ?? this.player.position;
+    this.lighting.followShadowFocus(focus.x, focus.z, this.terrain.heightAt(focus.x, focus.z));
+    this.lighting.update(delta);
+    this.stream.update(delta, focus);
+    this.forest.update(delta, focus);
+    this.corruption.update(delta, focus);
     this.player.syncMesh();
+  }
+
+  /**
+   * The atmosphere pass's top-down mask: R valley density, G corruption.
+   *
+   * Both channels come from the same walk over the world, so the mist that pools
+   * in the stream bed and the mist that goes green in the rot are exactly
+   * co-located - which matters, because the corruption is strongest in the valley
+   * and two masks from different lattices would visibly disagree about where the
+   * foul air is.
+   *
+   * This is a method rather than something built in the constructor because the
+   * render pipeline is constructed before the world exists. `main.ts` calls it
+   * straight after building the scene.
+   */
+  buildAtmosphereMask(resolution = 256): DataTexture {
+    const stream = this.terrain.stream;
+    return buildAtmosphereMask(
+      (x, z) => ({
+        distance: stream.distanceTo({ x, y: 0, z }).distance,
+        // `intensityAt` is the corruption system's own clamped answer, so the
+        // mist goes green exactly where the fungus does.
+        corruption: this.corruption.intensityAt(x, z),
+      }),
+      { size: this.terrain.sizeMetres, resolution, valleyWidth: DEFAULT_FOG_VALLEY_WIDTH },
+    );
   }
 
   /** Detach everything and release the resources this scene created. */

@@ -283,6 +283,8 @@ export class CorruptionSystem {
   private readonly sporeCount: number;
   private readonly sporeRadius: number;
   private readonly lightIntensity: number;
+  /** The corruption light's un-flickered intensity this frame. */
+  private glowIntensity = 0;
   private readonly flowAt?: (x: number, z: number) => { x: number; z: number };
   private readonly counts: Record<FungusKind, number>;
 
@@ -493,6 +495,18 @@ export class CorruptionSystem {
     return this.lastSpores;
   }
 
+  /**
+   * The rot light's un-flickered intensity this frame.
+   *
+   * `LightingSystem.flicker` takes this as its live baseline, which is what lets
+   * the glow flicker and still fade in and out with the corruption underfoot. A
+   * caller that registers no flicker can read the same number and gets exactly
+   * what `light.intensity` is.
+   */
+  get currentGlowIntensity(): number {
+    return this.glowIntensity;
+  }
+
   get isDisposed(): boolean {
     return this.disposed;
   }
@@ -543,7 +557,12 @@ export class CorruptionSystem {
       this.heightAt(camera.x, camera.z) + CORRUPTION_LIGHT_HEIGHT,
       camera.z,
     );
-    this.light.intensity = this.lightIntensity * this.lastCorruption;
+    // The baseline the flicker service modulates, if one is registered. Written
+    // here as well as there on purpose: this system is usable without the
+    // lighting rig, and a glow that only flickers when something else is
+    // watching is a glow nobody can test.
+    this.glowIntensity = this.lightIntensity * this.lastCorruption;
+    this.light.intensity = this.glowIntensity;
 
     this.advanceSpores(delta, camera);
   }

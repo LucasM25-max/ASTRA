@@ -121,6 +121,35 @@ The full build plan lives in [`plan.md`](./plan.md).
   gets a fixed collider — 174 of them at the origin, 8 at the far corner of the
   map — so the player cannot walk through a tree. Measured: 242,906 forest
   triangles in 50 draw calls, on top of the terrain's 293,378.
+- **Step 2.4 — The Corruption** (complete): the blight that runs the length of
+  the stream, from the village end to the cave that is its source. It is
+  entirely visual and atmospheric this phase — nothing about it changes what the
+  player can do.
+  `CorruptionField.ts` turns the stream's own pollution into a field over the
+  world: `intensity = pollution^0.75 * (1 - smoothstep(0, reach, distance))`,
+  where `reach` grows with the pollution, so the foul upstream end carries its
+  blight roughly twice as far as the clean downstream end. Walking the spline
+  from the cave to the village the intensity falls 0.92, 0.90, 0.81, 0.68, 0.50,
+  0.30 and the stage falls with it, 3, 3, 3, 2, 2, 1 — which is the plan's three
+  zones in order: inner (near the cave) stage 2-3, middle (mid-stream) stage 2,
+  outer (downstream) stage 1. About 12% of the world carries corruption at all,
+  and 1.8% is at stage 3.
+  The field reaches the world in five places. The terrain carries it as one
+  float per vertex, mixed into its own colour in the fragment shader. The bark
+  shifts toward grey and the canopy droops — quadratic in normalised height, so
+  a 10 m oak sinks 1.4 m and a 3.3 m sapling 0.42 m, both 14% of their own
+  height — and the crown twists about the tree's own axis with an angle that
+  grows up the trunk, so the trunk stays straight where its capsule collider is
+  and only the leaves turn. The ground cover desaturates and yellows by the same
+  luma weights, except the rocks, which do not die. `FungusGenerator.ts` builds
+  five procedural shapes — mushroom clusters, shelf brackets, spore pods,
+  carrion and rot — and `CorruptionSystem.ts` scatters them in a camera-following
+  patch, with fungal shelves hung off the corrupted trees and drifting spores
+  whose density and brightness both rise with the stage. One green point light
+  rides the camera and scales with the corruption underfoot, which is what makes
+  the pods read as glowing rather than merely bright.
+  Measured at the cave mouth, the worst ground in the world: 78 shelves on the
+  nearby trees, 36 ground fungi, and 45,045 triangles — 7% of the frame.
 
 ---
 
@@ -316,7 +345,7 @@ __ASTRA__.physics.stepCount            // fixed steps taken so far
 - **Boot is async.** Rapier's WASM must be initialised before a `World` can
   exist, so `main.ts` exports a `ready` promise that tests await. `index.html`
   needs no change — the module auto-starts.
-- 795 tests across 32 files, including a jsdom integration test that runs the
+- 998 tests across 40 files, including a jsdom integration test that runs the
   real `main.ts` bootstrap end to end and walks, runs, jumps, orbits and dilates
   through it.
 - **The terrain collider is a triangle mesh, not a Rapier heightfield.**
