@@ -135,21 +135,32 @@ describe('WorldScene', () => {
   it('gives the world a static terrain collider built from the mesh', async () => {
     const { world } = await buildScene();
 
-    // Two bodies: the fixed terrain and the dynamic player.
-    expect(world.physics.world.bodies.len()).toBe(2);
+    // The fixed terrain, the dynamic player, and one fixed body per nearby
+    // trunk. Step 2.3 gives trees colliders so the player cannot walk through
+    // them, and a capsule has to sit on a body of its own.
+    const trunkBodies = world.forest.colliderCount;
+    expect(trunkBodies).toBeGreaterThan(0);
+    expect(world.physics.world.bodies.len()).toBe(2 + trunkBodies);
 
     const fixed: number[] = [];
     const dynamic: number[] = [];
     world.physics.world.bodies.forEach((body) => {
       (body.isFixed() ? fixed : dynamic).push(body.translation().y);
     });
-    expect(fixed).toHaveLength(1);
     expect(dynamic).toHaveLength(1);
+    expect(fixed).toHaveLength(1 + trunkBodies);
 
     // The terrain body carries no offset, because the mesh's vertex buffer is
     // already in world coordinates - offsetting it here would shift the
-    // collision surface away from the visual one.
-    expect(fixed[0]).toBe(0);
+    // collision surface away from the visual one. It is found by its position
+    // rather than by its index: the trunk bodies are fixed too, and Rapier
+    // makes no promise about the order `forEach` visits them in.
+    // `bodies` exposes `forEach` but not `find`, so the search is by hand.
+    let terrainAtOrigin = false;
+    world.physics.world.bodies.forEach((body) => {
+      if (body.isFixed() && body.translation().y === 0) terrainAtOrigin = true;
+    });
+    expect(terrainAtOrigin).toBe(true);
 
     // And it spans the whole terrain, matching `terrain.sizeMetres / 2`.
     expect(world.terrain.sizeMetres).toBe(500);
@@ -315,7 +326,10 @@ describe('WorldScene', () => {
     expect(disposeLights).toHaveBeenCalledTimes(1);
     expect(disposePlayerGeometry).toHaveBeenCalledTimes(1);
 
-    // The player's body is gone from the simulation...
+    // The player's body and every trunk collider are gone from the simulation.
+    // A capsule that is removed without its body leaves a fixed body behind:
+    // it stops colliding, but it keeps its slot in the broad phase and keeps
+    // showing up here, which is exactly what this catches.
     expect(world.physics.world.bodies.len()).toBe(1); // just the ground
     // ...but the physics world itself survives: it was passed in, not created.
     expect(world.physics.isFreed).toBe(false);
@@ -329,4 +343,49 @@ describe('WorldScene', () => {
     expect(() => world.dispose()).not.toThrow();
     expect(disposeTerrain).toHaveBeenCalledTimes(1);
   });
+
+  it('carries the forest, placed against the same spline the valley was carved along', async () => {
+    const { world } = await buildScene();
+
+    // The forest exists, has trees, and is attached to the renderer's scene.
+    expect(world.forest.isDisposed).toBe(false);
+    expect(world.forest.placement.length).toBeGreaterThan(1000);
+    expect(world.forest.group.parent).not.toBeNull();
+
+    // Three levels of detail, all populated, and a partition of the placement.
+    const tiers = world.forest.tierCounts;
+    expect(tiers.near + tiers.medium + tiers.far).toBe(world.forest.placement.length);
+    expect(tiers.near).toBeGreaterThan(0);
+    expect(tiers.medium).toBeGreaterThan(0);
+    expect(tiers.far).toBeGreaterThan(0);
+
+    // Ground cover, and trunk colliders, both present from the first frame.
+    expect(world.forest.stats.foliage).toBeGreaterThan(0);
+    expect(world.forest.colliderCount).toBeGreaterThan(0);
+
+    // Nothing may be silently dropped from a tier's instance buffer.
+    expect(world.forest.droppedInstances).toBe(0);
+  }, 60000);
+
+  it('moves the forest with the player as the world is updated', async () => {
+    const { world } = await buildScene();
+
+    const before = world.forest.tierCounts;
+    // Far enough to cross several snapped rebuild cells.
+    world.update(FIXED_STEP * 4, { x: 120, y: 0, z: -90 });
+    const after = world.forest.tierCounts;
+
+    // The tiers are recomputed against the new camera position and still
+    // partition the placement exactly.
+    expect(after.near + after.medium + after.far).toBe(world.forest.placement.length);
+    expect(after).not.toEqual(before);
+    expect(world.forest.droppedInstances).toBe(0);
+  }, 60000);
+
+  it('advances the forest wind with game time', async () => {
+    const { world } = await buildScene();
+    expect(world.forest.windUniform.value).toBe(0);
+    world.update(2.5);
+    expect(world.forest.windUniform.value).toBeCloseTo(2.5, 6);
+  }, 60000);
 });

@@ -468,7 +468,7 @@ describe('render loop -> fixed timestep -> physics', () => {
     // The same wall-clock time yields a quarter of the simulation steps.
     expect(dilatedSteps).toBeGreaterThan(0);
     expect(dilatedSteps / fullSteps).toBeCloseTo(0.25, 1);
-  });
+  }, 30000);
 
   it('re-asserts the physics timestep on every step, so it cannot drift', async () => {
     rig = await createRig();
@@ -547,7 +547,7 @@ describe('render loop -> MovementController -> player', () => {
     // distance - with nothing in the controller referencing gameSpeed.
     expect(dilatedDistance).toBeGreaterThan(0);
     expect(dilatedDistance / fullDistance).toBeCloseTo(0.25, 1);
-  });
+  }, 30000);
 
   it('freezes the player completely when time is paused', async () => {
     rig = await createRig();
@@ -642,7 +642,7 @@ describe('render loop -> CameraController -> camera', () => {
     // this would be a quarter of the angle.
     expect(Math.abs(dilatedYaw - fullYaw)).toBeLessThan(0.05);
     expect(Math.abs(fullYaw)).toBeGreaterThan(0.5);
-  });
+  }, 30000);
 
   it('zooms at full speed while game time is dilated', async () => {
     const full = await createRig();
@@ -668,7 +668,7 @@ describe('render loop -> CameraController -> camera', () => {
 
     expect(dilatedDistance).toBeCloseTo(fullDistance, 3);
     expect(fullDistance).toBeLessThan(DEFAULT_CAMERA_DISTANCE);
-  });
+  }, 30000);
 
   it('still follows the player while game time is dilated', async () => {
     rig = await createRig();
@@ -855,7 +855,7 @@ describe('render loop -> DebugOverlay', () => {
     expect(busyPosition.x).toBeCloseTo(basePosition.x, 6);
     expect(busyPosition.y).toBeCloseTo(basePosition.y, 6);
     expect(busyPosition.z).toBeCloseTo(basePosition.z, 6);
-  });
+  }, 30000);
 
   it('logs input events to the console when F7 is pressed', async () => {
     rig = await createRig();

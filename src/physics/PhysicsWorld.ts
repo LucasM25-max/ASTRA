@@ -121,6 +121,27 @@ export interface CapsuleBody {
  * which reads as the ground being made of steps. This is the trimesh
  * equivalent of the heightfield flag of the same name.
  */
+/**
+ * One static vertical capsule, for a tree trunk.
+ *
+ * A capsule rather than a cuboid because the player is a capsule too, and a
+ * capsule against a cuboid catches on the box's vertical edges: walking into a
+ * tree would snag the player on a corner that has no visual counterpart. A
+ * capsule against a capsule slides.
+ */
+export interface TrunkColliderOptions {
+  /** World position of the capsule's centre. */
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  /** Half the length of the straight section, in metres. */
+  readonly halfHeight: number;
+  /** Radius of the capsule, in metres. */
+  readonly radius: number;
+  /** Friction coefficient. Defaults to `DEFAULT_FRICTION`. */
+  readonly friction?: number;
+}
+
 export interface TerrainColliderOptions {
   readonly vertices: Float32Array;
   readonly indices: Uint32Array;
@@ -167,6 +188,17 @@ export class PhysicsWorld {
   private readonly probeRay: RAPIER.Ray;
   private steps = 0;
   private freed = false;
+  /**
+   * Every collider this world has created and not yet removed.
+   *
+   * Rapier offers no way to ask a collider whether it is still in the world,
+   * and calling `parent()` on one that has been removed panics inside the WASM
+   * with an opaque `RuntimeError: unreachable` rather than throwing something
+   * catchable. Tracking the handles turns a double removal - which is an easy
+   * mistake for anything that adds and takes away colliders over time - into a
+   * no-op instead of a crash.
+   */
+  private readonly liveColliders = new Set<RAPIER.Collider>();
 
   private constructor(gravity: Vec3, timestep: number) {
     this.initialTimestep = requirePositive(timestep, 'timestep');
@@ -332,6 +364,7 @@ export class PhysicsWorld {
     );
     const collider = this.world.createCollider(RAPIER.ColliderDesc.cuboid(half, thick / 2, half), body);
     collider.setFriction(friction);
+    this.liveColliders.add(collider);
     return body;
   }
 
@@ -418,7 +451,7 @@ export class PhysicsWorld {
 
     // The vertices are already in world space, so the body sits at the origin.
     const body = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
-    this.world.createCollider(desc, body);
+    this.liveColliders.add(this.world.createCollider(desc, body));
     return body;
   }
 
@@ -453,6 +486,7 @@ export class PhysicsWorld {
     if (options.linearDamping !== undefined) body.setLinearDamping(options.linearDamping);
 
     const collider = this.world.createCollider(colliderDesc, body);
+    this.liveColliders.add(collider);
     return { body, collider };
   }
 
@@ -468,6 +502,75 @@ export class PhysicsWorld {
    * non-deterministic. Time dilation is already accounted for by the engine,
    * which simply issues fewer fixed steps when `gameSpeed` drops.
    */
+  /**
+   * Create one static vertical capsule collider and return it.
+   *
+   * The handle is the caller's to keep: `Forest` creates a capsule per nearby
+   * trunk and removes the ones that have gone out of range as the player walks,
+   * which is the only way to give every tree in a 500 m world a collider
+   * without paying for three thousand of them at once.
+   */
+  createTrunkCollider(options: TrunkColliderOptions): RAPIER.Collider {
+    if (this.freed) {
+      throw new Error('[PhysicsWorld] createTrunkCollider called after dispose()');
+    }
+    const { x, y, z, halfHeight, radius } = options;
+    for (const [label, value] of [
+      ['x', x],
+      ['y', y],
+      ['z', z],
+      ['halfHeight', halfHeight],
+      ['radius', radius],
+    ] as const) {
+      if (!Number.isFinite(value)) {
+        throw new RangeError(
+          `[PhysicsWorld] trunk collider ${label} must be finite, received ${String(value)}`,
+        );
+      }
+    }
+    if (halfHeight < 0) {
+      throw new RangeError(
+        `[PhysicsWorld] trunk collider halfHeight must not be negative, received ${halfHeight}`,
+      );
+    }
+    if (radius <= 0) {
+      throw new RangeError(
+        `[PhysicsWorld] trunk collider radius must be positive, received ${radius}`,
+      );
+    }
+
+    const body = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(x, y, z));
+    const collider = this.world.createCollider(
+      RAPIER.ColliderDesc.capsule(halfHeight, radius),
+      body,
+    );
+    collider.setFriction(options.friction ?? DEFAULT_FRICTION);
+    this.liveColliders.add(collider);
+    return collider;
+  }
+
+  /**
+   * Remove a collider this world created.
+   *
+   * The body goes with it. A collider is attached to a body, and removing only
+   * the collider leaves the body in the world: it stops colliding, but it keeps
+   * its slot in the broad phase and keeps showing up in `world.bodies.len()`.
+   * For anything that creates and destroys colliders over time - the forest's
+   * trunk capsules - that is a leak that behaves exactly like a working removal
+   * until somebody counts the bodies.
+   */
+  removeCollider(collider: RAPIER.Collider): void {
+    if (this.freed) return;
+    if (!collider) return;
+    // Unknown or already-removed handles are ignored. See `liveColliders`.
+    if (!this.liveColliders.has(collider)) return;
+    this.liveColliders.delete(collider);
+
+    const body = collider.parent();
+    if (body) this.world.removeRigidBody(body);
+    else this.world.removeCollider(collider, true);
+  }
+
   step(delta: number = this.initialTimestep): void {
     if (this.freed) return;
     const dt = Number.isFinite(delta) && delta > 0 ? delta : this.initialTimestep;
@@ -478,6 +581,10 @@ export class PhysicsWorld {
 
   /** Release the WASM memory held by this world and everything in it. */
   dispose(): void {
+    // The handles die with the world, so the set goes with them. Anything
+    // calling removeCollider afterwards is already turned away by `freed`.
+    this.liveColliders.clear();
+
     if (this.freed) return;
     this.freed = true;
     this.world.free();

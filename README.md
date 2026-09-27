@@ -86,6 +86,41 @@ The full build plan lives in [`plan.md`](./plan.md).
   Wading is drag, not collision: the player's horizontal velocity and jump are
   scaled down between 0.12 m and 0.45 m of submersion. No changes to
   `MovementController.ts`, and no swimming.
+- **Step 2.3 — The Forest** (complete): trees grown by an L-system — 3-4
+  iterations of branching, each branch a tapered cylinder of 3 rings by 6
+  radial segments with noise-displaced vertices and area-weighted smooth
+  normals, capped at the tip and left open at the base where it joins its
+  parent. Canopies are clusters of noise-displaced icosahedrons anchored to the
+  tree's topmost points rather than multiplied per growing tip, which is what
+  keeps one crown shaped like a crown. Four presets — oak (10.1 m tall, 4.9 m
+  spread, 2,240 canopy triangles), deciduous (7.5 m), sapling (3.3 m, single
+  trunk, small cluster) and dead (5.6 m, grey bark, an 80-triangle canopy of
+  bare twigs plus fungal clusters) — each in four variants, because a single
+  geometry per type makes every oak in the forest the same tree at a different
+  scale. Bark is a Voronoi `f2-f1` ridge in object-space XZ, which gives
+  vertical plates that survive stretching, turned into normals through Three's
+  own bump-map derivation rather than a hand-derived object-space gradient (the
+  fragment shader declares no `modelMatrix`, and for an `InstancedMesh` it would
+  be the wrong matrix anyway). Leaves keep their vertex-colour ramp and add a
+  view-dependent emissive lift as a subsurface-scattering approximation, with an
+  alpha-tested edge mask.
+  `ProceduralForest.ts` places trees with Bridson's Poisson disk sampling over a
+  density field that doubles near the stream and thins out up the hills: against
+  the shipped terrain that is 3,414 trees over 500 m — 137 per hectare, about 8
+  oak / 37 deciduous / 70 sapling / 21 dead, inside the plan's ranges. Each tree
+  gets a random 0.8-1.2 scale, rotation and a noise-driven lean, and the
+  probability of a dead tree climbs toward the polluted end of the stream.
+  Three levels of detail: full L-system geometry under 30 m, a simplified trunk
+  and one canopy sphere to 80 m, and a billboard cross of two intersecting
+  planes beyond that. `FoliageGenerator.ts` adds the ground layer — instanced
+  thin-triangle grass, crossed-plane ferns, displaced-sphere bush clusters, plus
+  rocks, fallen branches and leaf litter — and `FoliageMaterial.ts` moves it with
+  a quadratic-in-height wind phased on world position, so a gust rolls across
+  the patch instead of sliding it. The forest is a camera-following 80 m patch
+  that rescatters only when its snapped centre changes, and every nearby trunk
+  gets a fixed collider — 174 of them at the origin, 8 at the far corner of the
+  map — so the player cannot walk through a tree. Measured: 242,906 forest
+  triangles in 50 draw calls, on top of the terrain's 293,378.
 
 ---
 
@@ -124,14 +159,19 @@ src/
 │   ├── DebugHud.ts                The DOM panel: FPS, frame time, counters
 │   └── DebugOverlay.ts            Orchestrator, key bindings, input logging
 ├── physics/
-│   └── PhysicsWorld.ts            Rapier world, gravity, capsule + terrain colliders
+│   └── PhysicsWorld.ts            Rapier world, gravity, capsule + terrain + trunk colliders
 ├── procedural/
 │   ├── NoiseLibrary.ts            Perlin, Simplex, Voronoi, FBM — JS and GLSL
 │   ├── StreamSpline.ts            Catmull-Rom spline with an arc-length LUT
 │   ├── StreamGenerator.ts         Stream profile + extruded water ribbon
 │   ├── TerrainGenerator.ts        384×384 heightmap, biomes, channel, collider data
 │   ├── MaterialFactory.ts         Triplanar terrain material (no texture files)
-│   └── WaterShader.ts             Procedural water: flow, Fresnel, shoreline, sky
+│   ├── WaterShader.ts             Procedural water: flow, Fresnel, shoreline, sky
+│   ├── TreeGenerator.ts           L-system trees, simplified trees, billboards
+│   ├── TreeMaterial.ts            Bark (Voronoi plates, bump normals) + leaf (SSS)
+│   ├── FoliageGenerator.ts        Grass, ferns, undergrowth, rocks, branches, litter
+│   ├── FoliageMaterial.ts         Wind-vertex and fern-alpha shaders for the above
+│   └── ProceduralForest.ts        Poisson placement, density field, LOD tiering
 ├── player/
 │   ├── Player.ts                  Capsule mesh + dynamic body, synced per frame
 │   └── MovementController.ts      WASD, walk/run, jump, slopes, camera-relative
@@ -143,6 +183,7 @@ src/
 └── world/
     ├── Terrain.ts                 Façade over the heightmap + its collider
     ├── Stream.ts                  Water mesh, motes, queries, spatialised audio
+    ├── Forest.ts                  Three LOD tiers, trunk colliders, shared wind
     └── WorldScene.ts              Composes terrain + sky + lights + fog + stream + player
 ```
 
@@ -275,7 +316,7 @@ __ASTRA__.physics.stepCount            // fixed steps taken so far
 - **Boot is async.** Rapier's WASM must be initialised before a `World` can
   exist, so `main.ts` exports a `ready` promise that tests await. `index.html`
   needs no change — the module auto-starts.
-- 616 tests across 26 files, including a jsdom integration test that runs the
+- 794 tests across 32 files, including a jsdom integration test that runs the
   real `main.ts` bootstrap end to end and walks, runs, jumps, orbits and dilates
   through it.
 - **The terrain collider is a triangle mesh, not a Rapier heightfield.**
@@ -286,6 +327,14 @@ __ASTRA__.physics.stepCount            // fixed steps taken so far
   argument marshalling. See [rapier.rs#146](https://github.com/dimforge/rapier.rs/issues/146),
   open since 2025-11-17 in a repository that is now archived. The trimesh route
   is permanent; `createTerrainCollider` documents the evidence at the call site.
+- **The tree shaders are validated without a GPU.** A GLSL syntax error inside
+  an `onBeforeCompile` patch cannot be caught by `tsc` and cannot be seen until a
+  browser compiles it, so `tests/tree-material.test.ts` parses the *patched*
+  `THREE.ShaderLib.physical` sources with `@shaderfrog/glsl-parser` (a dev
+  dependency) and asserts the result is a well-formed program. The same tests
+  count ASTRA-injected uniforms per shader — a uniform declared in both the
+  vertex and the fragment shader is legal and shares one location — and check
+  that no patch declares the same thing twice.
 
 ---
 

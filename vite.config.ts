@@ -50,5 +50,12 @@ export default defineConfig({
     environment: 'node',
     include: ['tests/**/*.test.ts'],
     restoreMocks: true,
+    // 20s, not the 5s default. A handful of tests boot the real main.ts and
+    // then drive hundreds of animation frames through jsdom's ~16ms rAF timer,
+    // and the world they boot now carries a 3,400-tree forest alongside the
+    // 293,000-triangle terrain. Those tests take seconds by construction, and
+    // the ones that were slow enough to matter already carry their own larger
+    // explicit timeouts.
+    testTimeout: 20000,
   },
 });

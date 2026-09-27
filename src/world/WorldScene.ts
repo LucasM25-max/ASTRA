@@ -36,6 +36,7 @@
 
 import { Fog, type Scene } from 'three';
 import { LightingSystem } from '../renderer/LightingSystem';
+import { Forest, type ForestOptions } from './Forest';
 import { SkySystem, DEFAULT_HORIZON_COLOR } from '../renderer/SkySystem';
 import type { PhysicsWorld, Vec3 } from '../physics/PhysicsWorld';
 import { Player, PLAYER_HEIGHT, PLAYER_SPAWN } from '../player/Player';
@@ -113,11 +114,33 @@ export interface WorldSceneOptions {
     /** Audio overrides. Omit to run silent. */
     audio?: StreamAudioOptions;
   };
+  /**
+   * Forest generation parameters.
+   *
+   * The forest needs the terrain's height and normal samplers and the stream's
+   * spline, and takes both from what was just built - so the only things worth
+   * passing here are a different seed and the collider radius. Omit `physics`
+   * and the trees are drawn with no colliders at all, which is what a caller
+   * without a Rapier world does.
+   */
+  forest?: {
+    /** The stream path the forest reads pollution from. Defaults to the terrain's. */
+    spline?: StreamSpline;
+    /** World seed. Defaults to the terrain's. */
+    seed?: number;
+    /** How far from the camera trunks get a collider, in metres. */
+    colliderRadius?: number;
+    /** Per-kind foliage counts. */
+    foliageCounts?: ForestOptions['foliageCounts'];
+    /** Radius of the camera-following foliage patch, in metres. */
+    foliageRadius?: number;
+  };
 }
 
 export class WorldScene {
   readonly terrain: Terrain;
   readonly stream: Stream;
+  readonly forest: Forest;
   readonly sky: SkySystem;
   readonly lighting: LightingSystem;
   readonly player: Player;
@@ -176,8 +199,25 @@ export class WorldScene {
       audio: options.stream?.audio,
     });
 
+    // The forest is placed against the terrain and the stream that were just
+    // built, and against the *same* spline: the dead-tree share comes from the
+    // stream's pollution, and a forest placed against any other path would put
+    // its corruption somewhere else entirely.
+    this.forest = new Forest({
+      heightAt: (x, z) => this.terrain.heightAt(x, z),
+      normalAt: (x, z) => this.terrain.normalAt(x, z),
+      spline: options.forest?.spline ?? this.terrain.stream,
+      seed: options.forest?.seed ?? options.terrain?.seed,
+      size: options.terrain?.size,
+      physics: this.physics,
+      colliderRadius: options.forest?.colliderRadius,
+      foliageCounts: options.forest?.foliageCounts,
+      foliageRadius: options.forest?.foliageRadius,
+    });
+
     this.terrain.addTo(this.scene);
     this.stream.addTo(this.scene);
+    this.forest.addTo(this.scene);
     this.sky.addTo(this.scene);
     this.lighting.addTo(this.scene);
     this.player.addTo(this.scene);
@@ -246,6 +286,7 @@ export class WorldScene {
     this.elapsed += delta;
     this.sky.update(delta);
     this.stream.update(delta, listener ?? this.player.position);
+    this.forest.update(delta, listener ?? this.player.position);
     this.player.syncMesh();
   }
 
@@ -256,6 +297,7 @@ export class WorldScene {
 
     this.terrain.removeFrom(this.scene);
     this.stream.removeFrom(this.scene);
+    this.forest.removeFrom(this.scene);
     this.sky.removeFrom(this.scene);
     this.lighting.removeFrom(this.scene);
     this.player.removeFrom(this.scene);
@@ -264,6 +306,7 @@ export class WorldScene {
 
     this.terrain.dispose();
     this.stream.dispose();
+    this.forest.dispose();
     this.sky.dispose();
     this.lighting.dispose();
     this.player.dispose();

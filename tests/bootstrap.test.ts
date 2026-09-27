@@ -293,7 +293,7 @@ describe('bootstrap physics (Step 1.3)', () => {
     expect(handle.physics.stepCount).toBeGreaterThan(steps);
     expect(handle.worldScene.player.position.y).toBeLessThan(1);
     expect(handle.worldScene.player.position.y).toBeGreaterThan(0.85);
-  });
+  }, 30000);
 });
 
 describe('bootstrap camera (Step 1.5)', () => {
@@ -364,7 +364,7 @@ describe('bootstrap camera (Step 1.5)', () => {
       await nextFrame();
     }
     expect(handle.cameraController.distance).toBeCloseTo(10, 5);
-  });
+  }, 30000);
 
   it('keeps orbiting while game time is dilated', async () => {
     await bootApp();
@@ -587,7 +587,7 @@ describe('bootstrap movement (Step 1.4)', () => {
     // The default camera looks down -Z, so W carries the player to -Z.
     expect(handle.worldScene.player.position.z).toBeLessThan(start.z - 3);
     expect(Math.abs(handle.worldScene.player.position.x - start.x)).toBeLessThan(0.5);
-  });
+  }, 30000);
 
   // The three tests below drive hundreds of animation frames through the real
   // loop, which in jsdom means hundreds of ~16ms timer ticks. They are given
@@ -713,5 +713,5 @@ describe('bootstrap movement (Step 1.4)', () => {
     expect(handle.physics.stepCount).toBe(steps);
     expect(handle.worldScene.player.position.z).toBe(position.z);
     window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW', key: 'w' }));
-  });
+  }, 30000);
 });
