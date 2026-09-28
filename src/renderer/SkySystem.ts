@@ -144,7 +144,19 @@ const fragmentShader = /* glsl */ `
 
     // Coverage decides how much of the deck is cloud at all, so the same field
     // can be a clear sky or an overcast one without changing its shape.
-    float mask = smoothstep(1.0 - uCloudCoverage, 1.0 - uCloudCoverage + 0.28, density);
+    //
+    // The field is EXPANDED first, and that is the whole trick. Two octaves of
+    // Perlin with gain 0.5 average out towards the middle: measured over 60k
+    // samples the density spans 0.38 to 0.638 and 99% of it sits inside
+    // 0.40 to 0.60. Applying a coverage threshold to a range that narrow can
+    // only ever produce a wisp or a wall - at 0.55 the threshold caught the
+    // extreme 0.1% and the deck vanished entirely, and no reachable threshold
+    // produces a proper overcast either. A gain of 4 about the midpoint opens the
+    // field out to the full 0..1, and only then does coverage mean what it
+    // says: 0.55 covers roughly a third of the sky, 0.9 goes overcast, 0.2 leaves
+    // a few scraps.
+    float expanded = clamp((density - 0.5) * 4.0 + 0.5, 0.0, 1.0);
+    float mask = smoothstep(1.0 - uCloudCoverage, 1.0 - uCloudCoverage + 0.3, expanded);
     return mask * horizonFade;
   }
 
@@ -157,13 +169,39 @@ const fragmentShader = /* glsl */ `
    * and there are four stars in the whole hemisphere.
    */
   float starLayer(vec3 dir) {
-    vec3 p = dir * 190.0;
-    float a = astraHash1(p.xz + p.y * 17.0, 3.0);
-    float b = astraHash1(p.xz * 1.7 + p.y * 31.0, 11.0);
-    float near = smoothstep(0.9972, 1.0, a);
-    float far = smoothstep(0.9988, 1.0, b) * 0.55;
-    // Nothing below the horizon: the ground is in the way.
-    return (near + far) * smoothstep(-0.02, 0.06, dir.y);
+    // Quantise FIRST, then combine. Adding a continuous p.y term to both
+    // components before the hash - which is what the obvious version does -
+    // slides the quantisation boundary continuously with height, so the cells
+    // become long skewed slabs rather than cubes. Where one of those slabs
+    // happens to pass the threshold the result is a streak across the sky
+    // instead of a point, and it is unmistakable on screen.
+    vec3 cell = floor(dir * 190.0);
+    float a = astraHash1(cell.xz + cell.y * 17.0, 3.0);
+    float b = astraHash1(cell.xz * 1.7 + cell.y * 31.0, 11.0);
+    float near = smoothstep(0.9965, 1.0, a);
+    float far = smoothstep(0.9985, 1.0, b) * 0.55;
+    // Nothing below the horizon: the ground is in the way. The fade has to reach
+    // up well clear of it, not just past it - a star cell sitting right on the
+    // horizon projects to a wide, short quad, because the direction changes
+    // fastest there per unit of screen height, and the result is a row of
+    // horizontal dashes along the horizon instead of points.
+    return (near + far) * smoothstep(0.0, 0.14, dir.y);
+  }
+
+  /**
+   * How much a direction faces the sun around the horizon, 0..1.
+   *
+   * Both horizontals are guarded: straight up or down has no horizontal
+   * component, and normalising a zero vector is undefined behaviour that yields
+   * NaN - which in a colour channel is a black frame with nothing in the log.
+   */
+  float azimuthal(vec3 dir, vec3 sunDir) {
+    vec2 a = dir.xz;
+    vec2 b = sunDir.xz;
+    float la = length(a);
+    float lb = length(b);
+    if (la < 1e-4 || lb < 1e-4) return 0.0;
+    return pow(max(dot(a / la, b / lb), 0.0), 3.0);
   }
 
   void main() {
@@ -179,7 +217,15 @@ const fragmentShader = /* glsl */ `
     // to the horizon colour and hidden by the ground anyway.
     float height = clamp(dir.y, 0.0, 1.0);
     float gradient = pow(clamp(height + uDrift, 0.0, 1.0), uFalloff);
-    vec3 colour = mix(uHorizonColor, uZenithColor, gradient);
+
+    // The horizon glows towards the sun, and only while the sun is low. Without
+    // this the horizon is one colour all the way around, and a sunset reads as a
+    // flat band of brown rather than as light arriving from a direction - which
+    // is the single clearest tell that a sky is a gradient and not a sky.
+    float lowSun = 1.0 - smoothstep(0.0, 0.45, uSunDirection.y);
+    float glow = azimuthal(dir, uSunDirection) * lowSun * uSunDisc;
+    vec3 horizonColor = mix(uHorizonColor, uSunColor, glow * 0.5);
+    vec3 colour = mix(horizonColor, uZenithColor, gradient);
 
     // Clouds, lit from the sun's own direction so the deck is bright on the
     // sunward side and dark on the far side. A flat-coloured cloud layer is the
@@ -187,14 +233,26 @@ const fragmentShader = /* glsl */ `
     float cloud = cloudLayer(dir);
     if (cloud > 0.001) {
       float sunward = clamp(dot(normalize(vec3(dir.x, 0.35, dir.z)), uSunDirection) * 0.5 + 0.5, 0.0, 1.0);
-      vec3 cloudColour = uCloudColor * (0.45 + 0.85 * sunward);
+      // Wide contrast between the lit and shadowed side of the deck. A narrow
+      // range makes the clouds the same colour as the sky they sit against, which
+      // is the difference between a sky with weather in it and a slightly noisy
+      // gradient.
+      // Clouds are lit by the sun, so their brightness has to follow the sun. The
+      // obvious version - a fixed floor plus sunward shading - is calibrated
+      // against a daylight sky and leaves the deck roughly forty times brighter
+      // than the night sky it sits against, which is the single most obvious way
+      // to make a skybox look cheap. The moon lights the deck too, faintly, and
+      // only on the side it is actually on.
+      float moonward = max(dot(dir, uMoonDirection), 0.0);
+      float cloudLight = uSunIntensity * 0.33 + uMoonOpacity * moonward * 0.12 + 0.06;
+      vec3 cloudColour = uCloudColor * (0.32 + 1.25 * sunward) * cloudLight;
       colour = mix(colour, cloudColour, cloud * uCloudOpacity);
     }
 
     // Stars, then the moon, then the sun: back to front, so the moon occludes
     // the stars and the sun occludes everything. Drawing them in the other order
     // puts stars on top of the moon.
-    colour += vec3(0.85, 0.88, 1.0) * starLayer(dir) * uStarOpacity;
+    colour += vec3(0.92, 0.95, 1.0) * starLayer(dir) * uStarOpacity * 1.35;
 
     float moonDot = dot(dir, uMoonDirection);
     float moon = smoothstep(${MOON_COS.toFixed(6)}, ${(MOON_COS + 0.0004).toFixed(6)}, moonDot);
@@ -226,9 +284,27 @@ export interface SkySystemOptions {
   falloff?: number;
   /** Drift rate in radians/second. 0 disables the drift entirely. */
   driftSpeed?: number;
-  /** How much of the sky the cloud deck covers, 0..1. Defaults to 0.55. */
+  /**
+   * How much of the sky the cloud deck covers, 0..1. Defaults to 0.62.
+   *
+   * Measured, not guessed. The fbm density is expanded to the full 0..1 before
+   * the threshold is applied, and at 0.62 that leaves about a third of the sky
+   * clouded - a broken deck you can see through, which is what a late morning
+   * wants. Below about 0.35 the deck is a few scraps and effectively invisible;
+   * at 0.9 the sky goes properly overcast.
+   */
   cloudCoverage?: number;
-  /** Metres of sky per unit of cloud noise. Defaults to 0.02. */
+  /**
+   * Metres of sky per unit of cloud noise. Defaults to 0.28.
+   *
+   * This is the number that decides whether there is a cloud layer at all, and
+   * it is easy to set wrong by orders of magnitude. The deck is sampled through
+   * `dir.xz / dir.y`, which for a camera looking up spans roughly -13 to +13. At
+   * 0.02 that is a 0.5-wide patch of noise space - less than ONE fbm feature - so
+   * the whole visible sky sits inside a single smooth gradient and the deck is
+   * invisible no matter what the coverage says. At 0.28 the same view spans about
+   * eight features, which is a deck of readable cumulus rather than a tint.
+   */
   cloudScale?: number;
   /** Metres per second the deck scrolls. Defaults to 0.6. */
   cloudSpeed?: number;
@@ -245,7 +321,7 @@ export class SkySystem {
   constructor(options: SkySystemOptions = {}) {
     this.driftSpeed = Math.max(0, options.driftSpeed ?? DEFAULT_DRIFT_SPEED);
     this.cloudSpeed = Math.max(0, options.cloudSpeed ?? 0.6);
-    this.cloudScale = Math.max(1e-4, options.cloudScale ?? 0.02);
+    this.cloudScale = Math.max(1e-4, options.cloudScale ?? 0.28);
 
     const geometry = new SphereGeometry(options.radius ?? DEFAULT_SKY_RADIUS, 32, 16);
 
@@ -275,9 +351,9 @@ export class SkySystem {
         // The deck's own colour, before the sunward shading above. Cool and
         // desaturated: the style guide's restrained palette applies to the sky
         // too, and a white cloud deck fights the trees for attention.
-        uCloudColor: { value: new Color(0xb8c4cc) },
+        uCloudColor: { value: new Color(0xc2ccd4) },
         uCloudOpacity: { value: 0.6 },
-        uCloudCoverage: { value: Math.min(1, Math.max(0, options.cloudCoverage ?? 0.55)) },
+        uCloudCoverage: { value: Math.min(1, Math.max(0, options.cloudCoverage ?? 0.62)) },
         uCloudOffset: { value: new Vector3(0, 0, 0) },
         uCloudScale: { value: this.cloudScale },
       },

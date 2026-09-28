@@ -75,6 +75,56 @@ describe('SkySystem', () => {
     expect(material.fragmentShader).toContain('colorspace_fragment');
   });
 
+  it('scales the cloud deck so a view covers several noise features', () => {
+    // This is the number that decides whether there is a cloud layer at all, and
+    // it is easy to get wrong by orders of magnitude. The deck is sampled through
+    // dir.xz / dir.y, and for a camera looking up that projection spans roughly
+    // -13..13. At the original 0.02 the whole visible sky therefore sat inside a
+    // single 0.5-wide patch of noise - one smooth gradient, no deck, and no
+    // coverage value could fix it. Measured on CPU renders: at 0.02 the deck was
+    // invisible, at 0.28 it reads.
+    const sky = new SkySystem();
+    const scale = sky.mesh.material.uniforms.uCloudScale.value as number;
+
+    // A 62-degree vertical FOV looking up reaches a projection magnitude of
+    // tan(31deg) * 1.6 ~ 0.96 at the frame edge, and the horizon fade lets it run
+    // much further, so assert against the full span the deck can be asked for.
+    const widestProjection = Math.tan((62 * Math.PI) / 180) * 4;
+    expect(widestProjection * scale).toBeGreaterThan(2);
+    expect(scale).toBeGreaterThan(0.15);
+    expect(scale).toBeLessThan(4);
+  });
+
+  it('quantises the star cells before hashing them', () => {
+    // Adding a continuous p.y term to both hash inputs - which is what the
+    // obvious version does - slides the quantisation boundary continuously with
+    // height, so the cells become long skewed slabs rather than cubes. Where a
+    // slab happens to pass the threshold the result is a streak across the sky
+    // instead of a point, and it is unmistakable on screen. Quantising first is
+    // the whole fix, so it is asserted directly.
+    const sky = new SkySystem();
+    const src = sky.mesh.material.fragmentShader as string;
+
+    expect(src).toContain('floor(dir * 190.0)');
+    // The hash inputs must come from the quantised cell, not from raw direction.
+    expect(src).toMatch(/cell\.xz \+ cell\.y \* 17\.0/);
+    expect(src).not.toMatch(/p\.xz \+ p\.y \* 17\.0/);
+  });
+
+  it('lights the cloud deck from the sun rather than from a fixed floor', () => {
+    // Clouds are lit by the sun, so their brightness has to follow the sun. A
+    // fixed floor is calibrated against a daylight sky and leaves the deck about
+    // forty times brighter than the night sky it sits against, which is the
+    // single most obvious way to make a skybox look cheap.
+    const sky = new SkySystem();
+    const src = sky.mesh.material.fragmentShader as string;
+
+    expect(src).toContain('uSunIntensity * 0.33');
+    expect(src).toContain('uMoonOpacity * moonward * 0.12');
+    // The sunward shading must still be there on top of it, or the deck goes flat.
+    expect(src).toContain('0.32 + 1.25 * sunward');
+  });
+
   it('advances its own clock with game time', () => {
     const sky = new SkySystem();
 

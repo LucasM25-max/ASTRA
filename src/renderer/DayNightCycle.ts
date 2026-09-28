@@ -145,7 +145,7 @@ export const SKY_LADDER: readonly SkyKeyframe[] = [
     haze: 0xbfd0da,
     starOpacity: 0,
     moonOpacity: 0,
-    cloudOpacity: 0.55,
+    cloudOpacity: 0.78,
     sunDisc: 1,
   },
   {
@@ -162,7 +162,7 @@ export const SKY_LADDER: readonly SkyKeyframe[] = [
     haze: 0xc6d2d6,
     starOpacity: 0,
     moonOpacity: 0,
-    cloudOpacity: 0.6,
+    cloudOpacity: 0.62,
     sunDisc: 1,
   },
   {
@@ -179,7 +179,7 @@ export const SKY_LADDER: readonly SkyKeyframe[] = [
     haze: 0xd8ccbc,
     starOpacity: 0,
     moonOpacity: 0,
-    cloudOpacity: 0.7,
+    cloudOpacity: 0.78,
     sunDisc: 1,
   },
   {
@@ -195,7 +195,7 @@ export const SKY_LADDER: readonly SkyKeyframe[] = [
     haze: 0xd0a888,
     starOpacity: 0.05,
     moonOpacity: 0.1,
-    cloudOpacity: 0.8,
+    cloudOpacity: 0.85,
     sunDisc: 1,
   },
   {
@@ -211,7 +211,7 @@ export const SKY_LADDER: readonly SkyKeyframe[] = [
     haze: 0xa87868,
     starOpacity: 0.35,
     moonOpacity: 0.45,
-    cloudOpacity: 0.75,
+    cloudOpacity: 0.8,
     sunDisc: 0.7,
   },
   {
@@ -227,7 +227,7 @@ export const SKY_LADDER: readonly SkyKeyframe[] = [
     haze: 0x5a4858,
     starOpacity: 0.7,
     moonOpacity: 0.8,
-    cloudOpacity: 0.55,
+    cloudOpacity: 0.6,
     sunDisc: 0.15,
   },
   {
@@ -243,7 +243,7 @@ export const SKY_LADDER: readonly SkyKeyframe[] = [
     haze: 0x1e2636,
     starOpacity: 1,
     moonOpacity: 1,
-    cloudOpacity: 0.35,
+    cloudOpacity: 0.4,
     sunDisc: 0,
   },
 ];
