@@ -341,8 +341,13 @@ describe('AtmosphereShader', () => {
     }
     // The valley floor is several times denser than the open ground.
     expect(DEFAULT_FOG_SHADER.valleyBoost).toBeGreaterThan(2);
-    // And it thins with height over tens of metres, not instantly.
-    expect(DEFAULT_FOG_SHADER.heightFalloff).toBeGreaterThan(10);
+      // And it thins with height over several metres, not instantly. The test is
+      // "several, not one" - a falloff of 30 m is a uniform haze rather than
+      // ground fog, and the far field of a high camera comes back as a flat
+      // white wall with a luminance spread of 2.4, so the band has to stay in
+      // single-digit metres for the mist to read as a bank you see over.
+      expect(DEFAULT_FOG_SHADER.heightFalloff).toBeGreaterThan(4);
+      expect(DEFAULT_FOG_SHADER.heightFalloff).toBeLessThan(20);
     expect(DEFAULT_FOG_SHADER.heightBase).toBeLessThan(0);
   });
 

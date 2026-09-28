@@ -167,8 +167,22 @@ export const DEFAULT_FOG_SHADER: FogShaderOptions = {
   density: 0.0052,
   /** Height at which the fog is at full strength, in metres. Defaults to -3. */
   heightBase: -3,
-  /** Metres of height over which the fog thins to nothing. Defaults to 30. */
-  heightFalloff: 30,
+  /**
+   * Metres of height over which the fog thins to nothing. Defaults to 9.
+   *
+   * This is the number that decides whether the world has ground fog or a
+   * uniform haze, and it is easy to set wrong. At 30 the falloff is so gentle
+   * that a camera 34 m up still looks INTO a solid bank: the far field came back
+   * with a luminance standard deviation of 2.4 - a flat white wall with no
+   * structure and no colour left in it - because the mist was as thick 30 m up
+   * as it was on the ground.
+   *
+   * At 9 the mist is a bank you see OVER. From the same camera the valley floor
+   * is in fog and the ridges above it are clear, which is the depth layering the
+   * style guide's "volumetric fog" is asking for; a haze that fills the frame
+   * from horizon to horizon is not volumetric, it is a white sheet.
+   */
+  heightFalloff: 9,
   /** Extra density in the stream bed. Defaults to 3.4. */
   valleyBoost: 3.4,
   /** How far from the water the mist is felt, in metres. Defaults to 38. */
