@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Scene } from 'three';
+import { Color, Scene, Vector3 } from 'three';
 import { PhysicsWorld } from '../src/physics/PhysicsWorld';
 import {
   PLAYER_HALF_HEIGHT,
@@ -544,6 +544,151 @@ describe('WorldScene', () => {
       world.dispose();
       expect(world.corruption.isDisposed).toBe(true);
       expect(world.corruption.group.children.length).toBe(0);
+    }, 60000);
+  });
+
+  // The day/night cycle is wired into the scene, not merely present in it, and
+  // the wiring has exactly one load-bearing invariant: the light must point the
+  // same way the sky says the sun is. If those two drift apart the world is lit
+  // and shadowed from one direction while the sun is drawn in another, which is
+  // the single most convincing way to make a scene look broken - and it is a
+  // bookkeeping bug, not a rendering one, so nothing about the frame looks wrong
+  // enough to diagnose from a screenshot.
+  describe('day/night cycle', () => {
+    it('holds the tutorial hour still until it is resumed', async () => {
+      const { world } = await buildScene();
+
+      expect(world.dayNight.paused).toBe(true);
+      const before = world.dayNight.sample.sunIntensity;
+
+      // A full minute of game time must not move a paused cycle.
+      for (let i = 0; i < 60; i++) world.update(FIXED_STEP);
+
+      expect(world.dayNight.hour).toBeCloseTo(9.5, 6);
+      expect(world.dayNight.sample.sunIntensity).toBeCloseTo(before, 10);
+
+      world.dayNight.resume();
+      expect(world.dayNight.paused).toBe(false);
+    }, 60000);
+
+    it('points the light the same way the sky draws the sun, all day', async () => {
+      const { world } = await buildScene();
+      const skyUniforms = world.sky.mesh.material.uniforms;
+      const skySun = skyUniforms.uSunDirection.value as Vector3;
+
+      for (const hour of [6, 8, 9.5, 12, 15, 17, 18, 19.5, 22, 2]) {
+        world.dayNight.setTime(hour);
+
+        // The light's direction is the offset from its target to itself.
+        const light = world.lighting.sun;
+        const dx = light.position.x - light.target.position.x;
+        const dy = light.position.y - light.target.position.y;
+        const dz = light.position.z - light.target.position.z;
+        const len = Math.hypot(dx, dy, dz);
+        expect(len, `light offset collapsed to zero at hour ${hour}`).toBeGreaterThan(1);
+
+        const dot =
+          (dx * skySun.x + dy * skySun.y + dz * skySun.z) / len;
+        expect(dot, `light and sky sun disagree at hour ${hour}`).toBeGreaterThan(0.999);
+
+        // And the offset has to sit inside the shadow camera, or the sun is
+        // outside its own shadow map and every shadow in the world disappears.
+        expect(len).toBeLessThan(440);
+      }
+    }, 60000);
+
+    it('relights the world and recolours the sky as the hour changes', async () => {
+      const { world } = await buildScene();
+      const skyUniforms = world.sky.mesh.material.uniforms;
+
+      const read = () => ({
+        sun: world.lighting.sun.intensity,
+        ambient: world.lighting.ambient.intensity,
+        hemi: world.lighting.hemi.intensity,
+        stars: skyUniforms.uStarOpacity.value as number,
+        moon: skyUniforms.uMoonOpacity.value as number,
+        disc: skyUniforms.uSunDisc.value as number,
+        haze: world.dayNight.hazeColor,
+        horizon: (skyUniforms.uHorizonColor.value as Color).getHex(),
+      });
+
+      world.dayNight.setTime(9.5);
+      const morning = read();
+      world.dayNight.setTime(22);
+      const night = read();
+
+      // Day must be brighter than night on every channel that carries light.
+      expect(morning.sun).toBeGreaterThan(night.sun * 10);
+      expect(morning.ambient).toBeGreaterThan(night.ambient * 3);
+      expect(morning.hemi).toBeGreaterThan(night.hemi * 3);
+      // And night must have the sky furniture day does not.
+      expect(morning.stars).toBe(0);
+      expect(night.stars).toBe(1);
+      expect(morning.moon).toBe(0);
+      expect(night.moon).toBe(1);
+      expect(morning.disc).toBeGreaterThan(night.disc);
+      // The haze and the horizon both have to move, or the fog is lit by a sun
+      // that has already set.
+      expect(night.haze).toBeLessThan(morning.haze);
+      expect(night.horizon).not.toBe(morning.horizon);
+    }, 60000);
+
+    it('keeps the tutorial frame at the Step 2.5 light rig', async () => {
+      // Step 2.5 shipped a fixed late-morning rig: sun 0xfff1d6 at 2.6, ambient
+      // 0xa8bdd4 at 0.9, hemi 0xbcd4ea / 0x5c6b3a at 0.55.
+      //
+      // The 22-degree rung reproduces that rig verbatim, and the tutorial hour
+      // has to sit close enough to it that the frame the player first sees has
+      // not visibly changed. It cannot sit exactly on it: hour 9.5 puts the sun
+      // at 47.4 degrees, and the only hours that reach 22 degrees are 07:26 and
+      // 16:34, neither of which is late morning.
+      //
+      // The honest numbers, measured rather than assumed: the sun colour lands
+      // 0/2/8 sRGB levels away (a tint, not a brightness), while the sun and
+      // ambient intensities come out about 8% above the fixed rig - 2.80 against
+      // 2.6, and 0.97 against 0.9. That is the physical cost of a cycle: airmass
+      // at 47 degrees is genuinely about half what it is at 22, so the sun really
+      // is brighter there, and a ladder that flattened the top to preserve the
+      // old number would be less correct to buy nothing the player can see.
+      // The bound below is 10%, which is what the interpolation actually gives.
+      const { world } = await buildScene();
+
+      expect(world.lighting.sun.intensity).toBeGreaterThan(2.6);
+      expect(world.lighting.sun.intensity).toBeLessThan(2.9);
+      expect(world.lighting.ambient.intensity).toBeGreaterThan(0.9);
+      expect(world.lighting.ambient.intensity).toBeLessThan(1.0);
+      expect(world.lighting.hemi.intensity).toBeGreaterThan(0.5);
+      expect(world.lighting.hemi.intensity).toBeLessThan(0.6);
+
+      // The colours, though, are the part that reads as "the same game", and
+      // those are within a tint of Step 2.5. Expressed in sRGB levels because
+      // that is the unit the difference is perceived in; comparing in linear
+      // space and guessing a tolerance there is how the first two versions of
+      // this assertion came out too tight.
+      const actual = world.lighting.sun.color;
+      const rig = new Color(0xfff1d6);
+      const toSrgb = (l: number) =>
+        Math.round((l <= 0.0031308 ? 12.92 * l : 1.055 * Math.pow(l, 1 / 2.4) - 0.055) * 255);
+      const levels = Math.max(
+        Math.abs(toSrgb(actual.r) - toSrgb(rig.r)),
+        Math.abs(toSrgb(actual.g) - toSrgb(rig.g)),
+        Math.abs(toSrgb(actual.b) - toSrgb(rig.b)),
+      );
+      expect(levels).toBeLessThanOrEqual(8);
+
+      expect(world.lighting.ambient.color.getHex()).toBe(0xa8bdd4);
+      expect(world.lighting.hemi.color.getHex()).toBe(0xbcd4ea);
+      // The hemisphere's ground colour is deliberately NOT the Step 2.5 base:
+      // it is the base mixed 35% towards the sky's haze, because the light
+      // bouncing off the ground has passed through that air. So it is greyer
+      // than 0x5c6b3a while staying unmistakably green - which is the whole
+      // point of mixing it rather than hard-coding either end.
+      const ground = world.lighting.hemi.groundColor;
+      expect(ground.g).toBeGreaterThan(ground.r);
+      expect(ground.g).toBeGreaterThan(ground.b);
+      const base = new Color(0x5c6b3a);
+      expect(ground.r).toBeGreaterThan(base.r);
+      expect(ground.b).toBeGreaterThan(base.b);
     }, 60000);
   });
 });
