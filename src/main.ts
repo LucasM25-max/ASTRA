@@ -248,6 +248,13 @@ async function boot(): Promise<void> {
     // The light shafts radiate from the sun, so the pass needs to know where it
     // is. Off screen it draws nothing, which is the correct behaviour and needs
     // no special case anywhere.
+    //
+    // It is a WORLD POSITION, not a direction: the pass projects it to find the
+    // centre of the shafts, and a unit direction projects to a point near the
+    // world origin - which puts the rays in the middle of the map instead of
+    // around the sun. The direction itself comes from the day/night cycle via
+    // the light rig, so the shafts, the shadows and the disc in the sky are all
+    // the same sun.
     renderPipeline.setSunPosition(worldScene.lighting.sun.position.clone());
 
     // The player's movement: WASD, walk/run, jump, gravity and landing.
@@ -353,6 +360,16 @@ async function boot(): Promise<void> {
       // drift and the glow's flicker stop when the Active Encounter dilates time
       // in Phase 3.
       renderPipeline.updatePost(timeController.getDelta());
+      // The haze follows the sky: distant air is the sky seen through more air,
+      // so a fog that keeps a fixed colour while the sun moves is lit by a sun
+      // that has already set. Cheap enough to do every frame - it is one colour
+      // write - and it means the fog is never a frame behind the sky.
+      renderPipeline.setAtmosphereHaze(worldScene.dayNight.hazeColor);
+      // And the shafts follow the sun as it swings. The light rig slides the
+      // light along with the shadow box every frame, so this has to be re-read
+      // rather than set once - a stale position leaves the rays centred on where
+      // the sun was.
+      renderPipeline.setSunPosition(worldScene.lighting.sun.position);
       renderPipeline.render();
       // Last, so the renderer counters it reports describe the frame that has
       // just been drawn rather than the one before it.

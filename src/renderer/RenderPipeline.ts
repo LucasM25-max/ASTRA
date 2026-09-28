@@ -252,6 +252,19 @@ export class RenderPipeline {
     this.sunWorldPosition = sunWorldPosition;
   }
 
+  /**
+   * Recolour the fog's haze to match the sky.
+   *
+   * The day/night cycle drives this once per frame: distant air is the sky seen
+   * through more air, so a fog that keeps a fixed colour while the sun moves is
+   * lit by a sun that has already set. `corruption` is optional and defaults to
+   * leaving the rot's own tint alone.
+   */
+  setAtmosphereHaze(hazeColor: number, corruptionColor?: number): void {
+    if (!this.post) return;
+    this.post.setHazeColors(hazeColor, corruptionColor);
+  }
+
   setClearColor(color: number, alpha = 1): void {
     this.renderer.setClearColor(new Color(color), alpha);
   }

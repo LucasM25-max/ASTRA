@@ -43,6 +43,7 @@ import {
   type CorruptionSystemOptions,
 } from './CorruptionSystem';
 import { SkySystem, DEFAULT_HORIZON_COLOR } from '../renderer/SkySystem';
+import { DayNightCycle, type DayNightCycleOptions } from '../renderer/DayNightCycle';
 import type { PhysicsWorld, Vec3 } from '../physics/PhysicsWorld';
 import { Player, PLAYER_HEIGHT, PLAYER_SPAWN } from '../player/Player';
 import { Terrain } from './Terrain';
@@ -99,6 +100,14 @@ export interface WorldSceneOptions {
     far?: number;
     color?: number;
   };
+  /**
+   * Day/night cycle parameters. Defaults to the tutorial's paused late morning.
+   *
+   * The whole cycle ships in Step 2.6 and is held still for the tutorial, per
+   * the plan: pass `paused: false` (or call `world.dayNight.resume()`) to let
+   * the sun move, and `hour` to start somewhere other than late morning.
+   */
+  dayNight?: DayNightCycleOptions;
   /** Initial position of the player's capsule centre. Defaults to (0, 1, 0). */
   playerSpawn?: Vec3;
   /** Capsule radius in metres. Defaults to `PLAYER_RADIUS`. */
@@ -197,6 +206,15 @@ export class WorldScene {
   readonly corruption: CorruptionSystem;
   readonly sky: SkySystem;
   readonly lighting: LightingSystem;
+  /**
+   * The clock that decides what time of day it is.
+   *
+   * Held here rather than in main.ts because the sky and the light rig both need
+   * it every frame and they both live here. The fog's haze colour rides out
+   * through `hazeColor`, which main.ts pushes into the render pipeline - the
+   * pipeline does not exist yet when the world is built.
+   */
+  readonly dayNight: DayNightCycle;
   readonly player: Player;
   readonly physics: PhysicsWorld;
 
@@ -218,6 +236,11 @@ export class WorldScene {
     });
     this.sky = new SkySystem({ horizonColor: DEFAULT_HORIZON_COLOR });
     this.lighting = new LightingSystem();
+    // Paused at the tutorial's late morning: the cycle is complete and simply
+    // held still, so Phase 3 can start it with `dayNight.resume()`.
+    this.dayNight = new DayNightCycle(options.dayNight ?? {})
+      .attachSky(this.sky)
+      .attachLighting(this.lighting);
 
     // Spawn on the surface, not at a fixed height. On a heightmap a fixed
     // spawn puts the player inside a hill about half the time, and Rapier's
@@ -371,6 +394,9 @@ export class WorldScene {
 
     this.elapsed += delta;
     this.sky.update(delta);
+    // The cycle first: it recolours the sky and relights the world, and doing it
+    // after the light rig would spend a frame rendering the old sun's shadows.
+    this.dayNight.update(delta);
     // The light rig runs on the listener, not the player: the shadow box has to
     // sit under the camera, and the camera is what the player actually looks
     // through. Passing the player instead would leave the shadows a third-person

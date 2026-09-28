@@ -44,6 +44,7 @@ import {
   type Texture,
   Vector3,
 } from 'three';
+import type { SkySample } from './DayNightCycle';
 
 /** Angled rather than overhead, so shadows fall at a readable angle. */
 export const DEFAULT_SUN_POSITION = { x: 45, y: 70, z: 30 } as const;
@@ -169,6 +170,15 @@ export class LightingSystem {
   readonly group: Group;
 
   private readonly shadowExtent: number;
+  /**
+   * How far out along its direction the sun sits, in metres.
+   *
+   * Irrelevant to a directional light's shading - only the direction matters -
+   * but it must be outside the shadow camera's far plane or the light is inside
+   * its own box and casts nothing. Held as a field so `applySkyState` and the
+   * constructor agree on one number.
+   */
+  private readonly sunDistance: number;
   private readonly flickers: Flicker[] = [];
   private elapsed = 0;
 
@@ -194,6 +204,8 @@ export class LightingSystem {
     // The target starts at the origin, so the light's own position is its offset
     // from the focus.
     this.sunOffset = new Vector3(sunPosition.x, sunPosition.y, sunPosition.z);
+    // Far enough out to clear the shadow camera's far plane with room to spare.
+    this.sunDistance = Math.max(1, this.sunOffset.length());
 
     this.sun = new DirectionalLight(
       options.sunColor ?? DEFAULT_SUN_COLOR,
@@ -309,6 +321,68 @@ export class LightingSystem {
   setSunPosition(x: number, y: number, z: number): void {
     this.sun.position.set(x, y, z);
     this.sunOffset.set(x - this.shadowFocus.x, y - this.shadowFocus.y, z - this.shadowFocus.z);
+  }
+
+  /**
+   * Re-point the sun along a DIRECTION, keeping the shadow box where it is.
+   *
+   * This is what the day/night cycle needs and what `setSunPosition` cannot do:
+   * `setSunPosition` takes an absolute position, so a direction has to be turned
+   * into one by multiplying by a distance - and that absolute position is then
+   * measured against the current focus, which leaves `sunOffset` not parallel to
+   * the sun direction. The light then drifts off the axis its own shadow camera
+   * looks down.
+   *
+   * Here the offset is written directly as `direction * distance`, so the two
+   * invariants that matter both hold afterwards: the target is still the focus,
+   * and the light is still out along the direction. A later `followShadowFocus`
+   * slides both by the same vector and preserves both.
+   */
+  setSunDirection(direction: Vector3): void {
+    const length = direction.length();
+    // A zero direction would leave the offset at zero, putting the light exactly
+    // on its target - a directional light aimed at its own position casts no
+    // shadow at all and the world goes flat with no error anywhere.
+    if (!(length > 1e-6)) return;
+    this.sunOffset
+      .copy(direction)
+      .multiplyScalar(1 / length)
+      .multiplyScalar(Math.max(1, this.sunDistance));
+    this.sun.position.copy(this.shadowFocus).add(this.sunOffset);
+    this.sun.target.position.copy(this.shadowFocus);
+    this.sun.target.updateMatrixWorld();
+  }
+
+  /**
+   * Take a whole lighting state from the day/night cycle.
+   *
+   * The sun's direction comes from the cycle rather than from
+   * `DEFAULT_SUN_POSITION`, so the disc in the sky, the shadows on the ground
+   * and the colour of the sunlight are all the same sun. `setSunPosition` is
+   * used rather than writing `sun.position` directly because it re-bases
+   * `sunOffset` - without that the next `followShadowFocus` slides the shadow
+   * box back along the OLD direction and the shadows stop matching the sun.
+   *
+   * The intensity is written every frame, which is deliberate: a caller that
+   * also wants the sun to dim has something to overwrite, and the flicker
+   * service only touches point lights, so there is no fight here.
+   */
+  applySkyState(sample: SkySample): void {
+    // Re-point along the sampled direction. NOT `setSunPosition(dir * d)`: that
+    // takes an absolute world position and re-bases `sunOffset` against whatever
+    // the focus happens to be, which breaks the invariant that
+    // `sun.position - sun.target.position` is parallel to the sun direction. The
+    // next `followShadowFocus` then slides the light along the OLD direction and
+    // the shadows stop matching the sun - a bookkeeping bug that looks exactly
+    // like a lighting one.
+    this.setSunDirection(sample.sunDirection);
+    this.sun.color.set(sample.sunColor);
+    this.sun.intensity = Math.max(0, sample.sunIntensity);
+    this.ambient.color.set(sample.ambientColor);
+    this.ambient.intensity = Math.max(0, sample.ambientIntensity);
+    this.hemi.color.set(sample.hemiSkyColor);
+    this.hemi.groundColor.set(sample.hemiGroundColor);
+    this.hemi.intensity = Math.max(0, sample.hemiIntensity);
   }
 
   /* ---------------------------------------------------------------------- */

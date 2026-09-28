@@ -60,6 +60,8 @@ vi.mock('../src/renderer/RenderPipeline', async (importOriginal) => {
     post = null;
     setAtmosphereMask = vi.fn();
     setSunPosition = vi.fn();
+    // The Step 2.6 surface: the haze follows the sky, once per frame.
+    setAtmosphereHaze = vi.fn();
     setPostProcessingEnabled = vi.fn();
     updatePost = vi.fn();
   }

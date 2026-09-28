@@ -576,6 +576,20 @@ export class PostProcessing {
     u.uVignetteRadius.value = merged.vignetteRadius;
   }
 
+  /**
+   * Recolour the haze.
+   *
+   * The fog's colour is not a constant - it is the sky seen through air, so it
+   * has to follow the horizon or the distant world is lit by a sun that no
+   * longer exists. `haze` is the open-air colour; `corruption` is what the mist
+   * turns where the rot is, and is left alone unless it is passed.
+   */
+  setHazeColors(haze?: number, corruption?: number): void {
+    const u = this.atmospherePass.uniforms;
+    if (haze !== undefined) (u.uHazeColor.value as Color).set(haze);
+    if (corruption !== undefined) (u.uCorruptionColor.value as Color).set(corruption);
+  }
+
   applyFog(fog: Partial<FogShaderOptions> = {}): void {
     const merged = { ...DEFAULT_FOG_SHADER, ...fog };
     const u = this.atmospherePass.uniforms;

@@ -59,8 +59,17 @@ describe('SkySystem', () => {
     expect(material).toBeInstanceOf(ShaderMaterial);
     expect(material.uniforms.uFalloff.value).toBe(1.5);
     expect(material.uniforms.uDrift.value).toBe(0);
-    expect(material.vertexShader).toContain('vWorldPosition');
+    // The view direction must be measured from the CAMERA, not the world origin.
+    // On a 900m dome enclosing a 500m world the two differ by tens of degrees,
+    // which is enough to put the visible sun disc nowhere near the light that is
+    // actually casting the shadows.
+    expect(material.vertexShader).toContain('vViewDirection');
+    expect(material.vertexShader).toContain('cameraPosition');
+    expect(material.vertexShader).not.toContain('vWorldPosition');
     expect(material.fragmentShader).toContain('uHorizonColor');
+    expect(material.fragmentShader).toContain('uSunDirection');
+    expect(material.fragmentShader).toContain('uStarOpacity');
+    expect(material.fragmentShader).toContain('uCloudOpacity');
     // The shader must convert its linear output back to sRGB, or the sky
     // renders visibly too dark.
     expect(material.fragmentShader).toContain('colorspace_fragment');
