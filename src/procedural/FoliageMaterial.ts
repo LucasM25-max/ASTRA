@@ -57,7 +57,7 @@ import type { FoliageKind } from './FoliageGenerator';
 import { GRASS_HEIGHT, FERN_HEIGHT, FERN_WIDTH, BUSH_RADIUS } from './FoliageGenerator';
 
 /** Cache key. Bump whenever the injected GLSL changes. */
-export const FOLIAGE_MATERIAL_PROGRAM_KEY = 'astra-foliage-v1';
+export const FOLIAGE_MATERIAL_PROGRAM_KEY = 'astra-foliage-v2';
 
 /**
  * Defaults for the options that are genuinely global.
@@ -83,6 +83,16 @@ export interface FoliageMaterialOptions {
   noiseSeed?: number;
   /** Shared wind time, in seconds. Pass the same object to every material. */
   windUniform?: SharedFloatUniform;
+  /**
+   * Shared gust multiplier on the sway amplitude, the same object the tree
+   * materials and the ambient audio read.
+   *
+   * The forest's wind is one event. If the trees bent with a gust and the
+   * undergrowth did not, the ground would look calm while the canopy moved -
+   * which is not a thing that happens outdoors. So the multiplier is shared
+   * rather than modelled twice.
+   */
+  windStrengthUniform?: SharedFloatUniform;
   /** Overrides the per-kind defaults. */
   windStrength?: number;
   /** How much the high-frequency flutter contributes, relative to the gust. */
@@ -209,6 +219,7 @@ export function createFoliageMaterial(
   const d = KIND_DEFAULTS[kind];
   const o = { ...DEFAULT_FOLIAGE_MATERIAL_OPTIONS, ...options };
   const wind = options.windUniform ?? { value: 0 };
+  const gust = options.windStrengthUniform ?? { value: 1 };
 
   const params: MeshStandardMaterialParameters = {
     vertexColors: true,
@@ -224,14 +235,14 @@ export function createFoliageMaterial(
 
   const material = new MeshStandardMaterial(params);
   material.onBeforeCompile = (shader) => {
-    patchFoliageShader(shader, kind, o, wind);
+    patchFoliageShader(shader, kind, o, wind, gust);
   };
   material.customProgramCacheKey = () => `${FOLIAGE_MATERIAL_PROGRAM_KEY}-${kind}`;
   return material;
 }
 
 /** Options after defaults have been applied. Wind stays optional, per kind. */
-type ResolvedOptions = Omit<FoliageMaterialOptions, 'windUniform'>;
+type ResolvedOptions = Omit<FoliageMaterialOptions, 'windUniform' | 'windStrengthUniform'>;
 
 /**
  * Patch a Three.js shader pair in place.
@@ -248,6 +259,7 @@ export function patchFoliageShader(
   kind: FoliageKind,
   options: ResolvedOptions,
   wind: SharedFloatUniform = { value: 0 },
+  gust: SharedFloatUniform = { value: 1 },
 ): void {
   const d = KIND_DEFAULTS[kind];
 
@@ -255,6 +267,7 @@ export function patchFoliageShader(
   shader.uniforms.uFoliageHeight = { value: d.height };
   shader.uniforms.uWindTime = wind;
   shader.uniforms.uWindStrength = { value: options.windStrength ?? d.windStrength };
+  shader.uniforms.uWindGust = gust;
   shader.uniforms.uFlutterStrength = { value: options.flutterStrength ?? d.flutterStrength };
   shader.uniforms.uFoliageTint = { value: options.tintStrength };
   shader.uniforms.uFoliageCorruption = { value: options.corruptionStrength ?? 0 };
@@ -277,6 +290,7 @@ export function patchFoliageShader(
       varying vec3 vAstraFoliageObject;
       uniform float uWindTime;
       uniform float uWindStrength;
+      uniform float uWindGust;
       uniform float uFlutterStrength;
       uniform float uFoliageHeight;
       ${NOISE_GLSL}
@@ -297,14 +311,14 @@ export function patchFoliageShader(
           astraSimplex2D( phase + vec2( time * 0.32, 0.0 ), 3.0 ),
           astraSimplex2D( phase + vec2( time * 0.32, 19.0 ), 8.0 )
         );
-        float gust = uWindStrength * ( w * w * 0.75 + w * 0.25 );
+        float gust = uWindStrength * uWindGust * ( w * w * 0.75 + w * 0.25 );
 
         // The flutter: high frequency, keyed on the blade's own position, so
         // each blade has its own. Without it the field moves as one sheet.
         float flutter = astraSimplex2D(
           objectPos.xz * 7.0 + vec2( time * 1.7, time * 1.1 ), 7.0
         );
-        float flutterAmp = uWindStrength * uFlutterStrength * w * w * flutter;
+        float flutterAmp = uWindStrength * uWindGust * uFlutterStrength * w * w * flutter;
 
         return gustDir * ( gust + flutterAmp );
       }
@@ -451,7 +465,13 @@ export function foliageShaderSources(
     fragmentShader: BASELINE_FRAGMENT_SHADER,
     uniforms: {} as Record<string, unknown>,
   };
-  patchFoliageShader(shader, kind, { ...DEFAULT_FOLIAGE_MATERIAL_OPTIONS, ...options }, options.windUniform);
+  patchFoliageShader(
+    shader,
+    kind,
+    { ...DEFAULT_FOLIAGE_MATERIAL_OPTIONS, ...options },
+    options.windUniform,
+    options.windStrengthUniform,
+  );
   return shader;
 }
 

@@ -58,6 +58,12 @@
 import { Howl, Howler } from 'howler';
 import type { Stream } from '../world/Stream';
 import type { SplinePoint } from '../procedural/StreamSpline';
+import { wavDataUri } from './SoundForge';
+
+// Re-exported so the container writer has exactly one implementation. Step 2.8
+// added a stereo packer and a family of synthesised clips, and two copies of a
+// 44-byte header writer that can drift apart is one more than there needs to be.
+export { wavDataUri };
 
 /** Sample rate of the synthesised loop, in Hz. Water is broadband and low. */
 const LOOP_SAMPLE_RATE = 16000;
@@ -149,50 +155,6 @@ export function synthesizeWaterWav(seed = 0, seconds = LOOP_SECONDS): string {
   }
 
   return wavDataUri(pcm, sampleRate);
-}
-
-/** Wrap 16-bit mono PCM in a WAV container and base64 it into a data URI. */
-export function wavDataUri(pcm: Int16Array, sampleRate: number): string {
-  const bytes = new Uint8Array(44 + pcm.length * 2);
-  const view = new DataView(bytes.buffer);
-
-  const ascii = (offset: number, text: string): void => {
-    for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
-  };
-
-  ascii(0, 'RIFF');
-  view.setUint32(4, 36 + pcm.length * 2, true);
-  ascii(8, 'WAVE');
-  ascii(12, 'fmt ');
-  view.setUint32(16, 16, true); // PCM chunk size
-  view.setUint16(20, 1, true); // format: PCM
-  view.setUint16(22, 1, true); // channels
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true); // byte rate
-  view.setUint16(32, 2, true); // block align
-  view.setUint16(34, 16, true); // bits per sample
-  ascii(36, 'data');
-  view.setUint32(40, pcm.length * 2, true);
-
-  for (let i = 0; i < pcm.length; i++) view.setInt16(44 + i * 2, pcm[i], true);
-
-  return `data:audio/wav;base64,${base64FromBytes(bytes)}`;
-}
-
-/** Base64 without `btoa`, which chokes on large inputs in some engines. */
-function base64FromBytes(bytes: Uint8Array): string {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  let out = '';
-  for (let i = 0; i < bytes.length; i += 3) {
-    const b0 = bytes[i];
-    const b1 = bytes[i + 1];
-    const b2 = bytes[i + 2];
-    out += alphabet[b0 >> 2];
-    out += alphabet[((b0 & 3) << 4) | ((b1 ?? 0) >> 4)];
-    out += b1 === undefined ? '=' : alphabet[((b1 & 15) << 2) | ((b2 ?? 0) >> 6)];
-    out += b2 === undefined ? '=' : alphabet[b2 & 63];
-  }
-  return out;
 }
 
 /** True when the environment can actually play audio. */

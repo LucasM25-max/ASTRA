@@ -102,7 +102,7 @@ import {
 import { generateFungalShelf } from '../procedural/FungusGenerator';
 import { createFungusMaterial } from '../procedural/FungusMaterial';
 import { CorruptionField } from '../procedural/CorruptionField';
-import { createRng } from '../procedural/NoiseLibrary';
+import { SimplexNoise2D, createRng } from '../procedural/NoiseLibrary';
 import {
   placeTrees,
   tierTrees,
@@ -272,6 +272,35 @@ export class Forest {
 
   /** The shared wind time, in seconds. One object, one write per frame. */
   readonly windUniform: SharedFloatUniform = { value: 0 };
+
+  /**
+   * The shared gust multiplier. One object, one write per frame.
+   *
+   * Every swaying thing in this forest - bark, canopy, fern, grass blade and
+   * fungal shelf - reads this object, and so does the ambient audio. That is
+   * the whole point of it: a gust that bends the canopy is by construction the
+   * gust that swells the wind layer, because there is one number and both of
+   * them read it. A second model of the wind living in the audio system would
+   * agree with this one for a while and then stop.
+   */
+  readonly windGustUniform: SharedFloatUniform = { value: 1 };
+
+  /**
+   * The gust multiplier for the current frame, 0 to 1 where 1 is a full gust.
+   *
+   * Derived from a slow walk through one simplex noise field. Walking a line
+   * through noise space rather than summing sines gives gusts that vary in
+   * strength and spacing instead of arriving on a beat, which is what makes
+   * weather read as weather rather than as an LFO.
+   */
+  private readonly gustNoise = new SimplexNoise2D(0x51a7);
+
+  /** How far the gust may drop below calm, and how far above it. */
+  private static readonly GUST_MIN = 0.18;
+  private static readonly GUST_MAX = 1.75;
+
+  /** Rate the noise field is walked at, in noise units per second. */
+  private static readonly GUST_RATE = 0.055;
 
   private readonly physics: PhysicsWorld | null;
   private readonly colliderRadius: number;
@@ -486,6 +515,7 @@ export class Forest {
       // fern and shelf in this forest is phased on, and the forest would stop
       // moving while the rest of the world swayed - a bug with no visible cause.
       windUniform: this.windUniform,
+      windStrengthUniform: this.windGustUniform,
       noiseSeed: options.seed ?? 1,
     });
     this.materials.push(barkMaterial);
@@ -506,6 +536,7 @@ export class Forest {
         // and a 3 m sapling, and whichever it picked would be wrong for the other
         // - the sapling flattened and the oak untouched.
         windUniform: this.windUniform,
+        windStrengthUniform: this.windGustUniform,
         noiseSeed: seed,
         treeHeight: TREE_PRESETS[type].height,
         corruptionDroop:
@@ -837,6 +868,10 @@ export class Forest {
 
       const material = createFoliageMaterial(kind, {
         windUniform: this.windUniform,
+        // The gust comes after the spread on purpose: a caller's foliage options
+        // must not be able to hand the undergrowth a different wind from the
+        // one the canopy is moving in.
+        windStrengthUniform: this.windGustUniform,
         noiseSeed: options.seed ?? 1,
         ...options.foliage,
       });
@@ -869,6 +904,11 @@ export class Forest {
 
     this.elapsed += delta;
     this.windUniform.value = this.elapsed;
+    // The gust is written here, in the forest, rather than in the ambient audio:
+    // the trees have to move with the wind whether or not anything is listening,
+    // and a forest whose sway depends on the audio system being alive is a forest
+    // that stops moving the moment the player mutes the game.
+    this.windGustUniform.value = this.gustAt(this.elapsed);
 
     const cell = this.snap(camera.x, camera.z, this.rebuildDistance);
     if (cell.x !== this.lastTierCell.x || cell.z !== this.lastTierCell.z) {
@@ -881,6 +921,21 @@ export class Forest {
       this.rescatterFoliage(camera.x, camera.z);
       this.lastFoliageCell = foliageCell;
     }
+  }
+
+  /**
+   * The gust multiplier at `time` seconds of world time.
+   *
+   * Smooth noise in, a clamped remap out. The remap matters: raw simplex noise
+   * spends most of its time near zero, so a gust driven straight off it would
+   * sit at "barely any wind" for most of a minute and then spike. Stretching
+   * the range to 0.18-1.75 spends the time between a whisper and a proper gust
+   * instead, which is what a forest sounds like.
+   */
+  private gustAt(time: number): number {
+    const n = this.gustNoise.noiseNormalized(time * Forest.GUST_RATE, 0.5);
+    const u = Math.min(1, Math.max(0, n * 0.5 + 0.5));
+    return Forest.GUST_MIN + (Forest.GUST_MAX - Forest.GUST_MIN) * u;
   }
 
   /** Snap a position to the rebuild grid. */

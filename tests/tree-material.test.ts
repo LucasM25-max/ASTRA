@@ -42,6 +42,18 @@ function patched(
  * from the material's properties rather than through `shader.uniforms`. An
  * unfiltered reverse check would demand a uniform for every one of them.
  */
+/** Resolve options against a patch's own defaults, exactly as the patch does. */
+function barkOptions(
+  o: BarkMaterialOptions = {},
+): Required<Omit<BarkMaterialOptions, 'windUniform' | 'windStrengthUniform'>> {
+  return { ...DEFAULT_BARK_MATERIAL_OPTIONS, ...o };
+}
+function leafOptions(
+  o: LeafMaterialOptions = {},
+): Required<Omit<LeafMaterialOptions, 'windUniform' | 'windStrengthUniform'>> {
+  return { ...DEFAULT_LEAF_MATERIAL_OPTIONS, ...o };
+}
+
 function declaredUniforms(src: string, only = /^$/): string[] {
   const out: string[] = [];
   const re = /uniform\s+\w+\s+(\w+)\s*;/g;
@@ -359,8 +371,60 @@ describe('shared wind', () => {
   it('disables the sway when the strength is zero', () => {
     const src = barkShaderSources({ windStrength: 0 });
     expect(src.uniforms.uWindStrength).toEqual({ value: 0 });
-    // amp is strength * h * h * 0.012, so zero strength is zero amplitude.
-    expect(src.vertexShader).toContain('uWindStrength * h * h * 0.012');
+    // amp is strength * gust * h * h * 0.012, so zero strength is zero
+    // amplitude whatever the gust happens to be doing.
+    expect(src.vertexShader).toContain('uWindStrength * uWindGust * h * h * 0.012');
+  });
+});
+
+describe('the shared gust multiplier', () => {
+  it('defaults to one, so a forest built without one sways exactly as before', () => {
+    // This is the compatibility guarantee. Every material created without an
+    // explicit gust gets its own { value: 1 } object, which is the identity for
+    // the multiplication - so Step 2.8 added a dimension to the wind without
+    // changing the behaviour of anything that does not use it.
+    for (const src of [barkShaderSources(), leafShaderSources()]) {
+      expect(src.uniforms.uWindGust).toEqual({ value: 1 });
+    }
+  });
+
+  it('shares one object between the two materials when one is passed', () => {
+    const gust = { value: 0.4 };
+    const bark = patched((s) => patchBarkShader(s, barkOptions(), { value: 0 }, gust));
+    const leaf = patched((s) => patchLeafShader(s, leafOptions(), { value: 0 }, gust));
+    // Identity, not equality: two { value: 0.4 } objects would pass an equality
+    // check and still be two gusts.
+    expect(bark.uniforms.uWindGust).toBe(leaf.uniforms.uWindGust);
+    expect(bark.uniforms.uWindGust).toBe(gust);
+  });
+
+  it('scales the sway amplitude linearly in both materials', () => {
+    // The point of the gust is that it scales the whole amplitude rather than
+    // adding to it, so a calm moment is the same wind, quieter. A test that only
+    // checked that the uniform exists would not catch an additive
+    // implementation, which would make a calm moment lean sideways instead.
+    for (const [name, src] of [
+      ['bark', barkShaderSources()],
+      ['leaf', leafShaderSources()],
+    ] as const) {
+      // Every line that mentions the gust. Matching the lines rather than a
+      // hardcoded expression keeps this honest if the sway maths is retuned:
+      // what is being asserted is that each use is a multiplication, not what
+      // it is multiplied into.
+      // Comments are stripped first: the sway block's own documentation names
+      // the uniform, and a prose line is not an implementation.
+      const lines = src.vertexShader
+        .split('\n')
+        .filter((l) => !l.trim().startsWith('//'))
+        .filter((l) => l.includes('uWindGust'));
+      expect(lines.length, `${name} uses the gust`).toBeGreaterThan(0);
+      for (const line of lines) {
+        // The declaration itself carries no arithmetic, so it is exempt.
+        if (/uniform\s+float\s+uWindGust\s*;/.test(line)) continue;
+        expect(line, `${name} multiplies by the gust`).toMatch(/\*\s*uWindGust/);
+        expect(line, `${name} does not add to the gust`).not.toMatch(/[+-]\s*uWindGust/);
+      }
+    }
   });
 });
 

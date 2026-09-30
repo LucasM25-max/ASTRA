@@ -279,6 +279,10 @@ export interface TerrainData {
   normalAt(x: number, z: number): { x: number; y: number; z: number };
   /** 0 = flat, 1 = vertical. */
   slopeAt(x: number, z: number): number;
+  /** 0..1 corruption at a world position, bilinearly interpolated. */
+  corruptionAt(x: number, z: number): number;
+  /** The four terrain biome weights at a world position. They sum to one. */
+  biomeAt(x: number, z: number): { grass: number; dirt: number; rock: number; mud: number };
 }
 
 /** Smooth Hermite step from 0 to 1. */
@@ -678,7 +682,81 @@ export function generateTerrain(options: TerrainGeneratorOptions = {}): TerrainD
     heightAt: (x, z) => sampleHeight(heights, resolution, size, x, z),
     normalAt: (x, z) => sampleNormal(heights, resolution, size, x, z),
     slopeAt: (x, z) => 1 - sampleNormal(heights, resolution, size, x, z).y,
+    corruptionAt: (x, z) => sampleScalar(corruption, resolution, size, x, z),
+    biomeAt: (x, z) => sampleBiome(biomeWeights, resolution, size, x, z),
   };
+}
+
+/**
+ * Bilinearly sample a one-float-per-vertex field.
+ *
+ * Same lattice, same clamping and the same interpolation as `sampleHeight`, so a
+ * consumer that asks the terrain two questions about the same point gets two
+ * answers about the same place. `corruptionAt` goes through this rather than
+ * reaching into the array directly, because the array is row-major over the
+ * grid and an index computed by hand is an index that can be wrong.
+ */
+function sampleScalar(
+  field: Float32Array,
+  resolution: number,
+  size: number,
+  x: number,
+  z: number,
+): number {
+  const half = size / 2;
+  const step = size / (resolution - 1);
+  const fx = (x + half) / step;
+  const fz = (z + half) / step;
+  const j = Math.min(resolution - 2, Math.max(0, Math.floor(fx)));
+  const i = Math.min(resolution - 2, Math.max(0, Math.floor(fz)));
+  const tx = clamp01(fx - j);
+  const tz = clamp01(fz - i);
+
+  const k00 = i * resolution + j;
+  const a = field[k00] + (field[k00 + 1] - field[k00]) * tx;
+  const b = field[k00 + resolution] + (field[k00 + resolution + 1] - field[k00 + resolution]) * tx;
+  return a + (b - a) * tz;
+}
+
+/**
+ * Bilinearly sample the four biome weights at a world position.
+ *
+ * Interpolating the weights rather than snapping to the nearest vertex is what
+ * keeps a surface boundary from stepping under the player's feet. The weights
+ * are normalised to sum to one, and a bilinear blend of normalised quads is
+ * still normalised, so the result is a valid distribution at every point -
+ * including exactly on a boundary, where it correctly reports a mixture rather
+ * than an arbitrary pick between two surfaces.
+ */
+function sampleBiome(
+  weights: Float32Array,
+  resolution: number,
+  size: number,
+  x: number,
+  z: number,
+): { grass: number; dirt: number; rock: number; mud: number } {
+  const half = size / 2;
+  const step = size / (resolution - 1);
+  const fx = (x + half) / step;
+  const fz = (z + half) / step;
+  const j = Math.min(resolution - 2, Math.max(0, Math.floor(fx)));
+  const i = Math.min(resolution - 2, Math.max(0, Math.floor(fz)));
+  const tx = clamp01(fx - j);
+  const tz = clamp01(fz - i);
+
+  const k00 = (i * resolution + j) * BIOME_COUNT;
+  const k10 = k00 + BIOME_COUNT;
+  const k01 = k00 + resolution * BIOME_COUNT;
+  const k11 = k01 + BIOME_COUNT;
+
+  const out = { grass: 0, dirt: 0, rock: 0, mud: 0 };
+  const keys = ['grass', 'dirt', 'rock', 'mud'] as const;
+  for (let c = 0; c < BIOME_COUNT; c++) {
+    const a = weights[k00 + c] + (weights[k10 + c] - weights[k00 + c]) * tx;
+    const b = weights[k01 + c] + (weights[k11 + c] - weights[k01 + c]) * tx;
+    out[keys[c]] = a + (b - a) * tz;
+  }
+  return out;
 }
 
 /* -------------------------------------------------------------------------- */

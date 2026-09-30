@@ -30,10 +30,10 @@ function patched(
 }
 
 /** Resolve options against a patch's own defaults, exactly as the patch does. */
-function barkOptions(o: BarkMaterialOptions = {}): Required<Omit<BarkMaterialOptions, 'windUniform'>> {
+function barkOptions(o: BarkMaterialOptions = {}): Required<Omit<BarkMaterialOptions, 'windUniform' | 'windStrengthUniform'>> {
   return { ...DEFAULT_BARK_MATERIAL_OPTIONS, ...o };
 }
-function leafOptions(o: LeafMaterialOptions = {}): Required<Omit<LeafMaterialOptions, 'windUniform'>> {
+function leafOptions(o: LeafMaterialOptions = {}): Required<Omit<LeafMaterialOptions, 'windUniform' | 'windStrengthUniform'>> {
   return { ...DEFAULT_LEAF_MATERIAL_OPTIONS, ...o };
 }
 

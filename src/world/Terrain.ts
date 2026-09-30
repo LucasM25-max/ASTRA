@@ -163,6 +163,30 @@ export class Terrain {
     return this.data.slopeAt(x, z);
   }
 
+  /**
+   * 0..1 corruption at a world position, bilinearly interpolated.
+   *
+   * Reads the same baked field the terrain shader blends with, so the audio and
+   * the visuals agree about where the rot is without either of them having to
+   * be told about the other.
+   */
+  corruptionAt(x: number, z: number): number {
+    return this.data.corruptionAt(x, z);
+  }
+
+  /**
+   * The four terrain biome weights at a world position. They sum to one.
+   *
+   * This is what a footstep uses to decide what it landed on. It reads the
+   * terrain's own weights rather than re-deriving them from height and slope,
+   * because a second implementation of the same rules is a second thing that
+   * can be wrong - and the visible consequence would be footstep sounds that
+   * disagree with the ground the player can see.
+   */
+  biomeAt(x: number, z: number): { grass: number; dirt: number; rock: number; mud: number } {
+    return this.data.biomeAt(x, z);
+  }
+
   /** Distance from a world position to the stream, in metres. */
   distanceToStream(x: number, z: number): number {
     return this.stream.distanceTo({ x, y: 0, z }).distance;

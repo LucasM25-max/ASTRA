@@ -59,8 +59,8 @@ import { FrontSide, DoubleSide, MeshStandardMaterial, type MeshStandardMaterialP
 import { NOISE_GLSL } from './NoiseLibrary';
 
 /** Cache keys. Bump whenever the injected GLSL changes. */
-export const BARK_PROGRAM_KEY = 'astra-bark-v1';
-export const LEAF_PROGRAM_KEY = 'astra-leaf-v1';
+export const BARK_PROGRAM_KEY = 'astra-bark-v2';
+export const LEAF_PROGRAM_KEY = 'astra-leaf-v2';
 
 /** A single float uniform both materials can share, so one write drives both. */
 export interface SharedFloatUniform {
@@ -82,6 +82,17 @@ export interface BarkMaterialOptions {
   metalness?: number;
   /** Shared wind time, in seconds. Pass the same object to both materials. */
   windUniform?: SharedFloatUniform;
+  /**
+   * Shared gust multiplier on the sway amplitude. Pass the same object to both
+   * materials and to the ambient audio.
+   *
+   * This is the seam that keeps the sound of the wind and the movement of the
+   * trees the same event. The GLSL sway function and the audio both scale off
+   * this one number, so a gust that bends the canopy is by construction the gust
+   * that swells the wind layer - there is no second model of the wind that can
+   * drift out of agreement with the first.
+   */
+  windStrengthUniform?: SharedFloatUniform;
   /** Peak sway at ten metres up, in metres. Zero disables the sway. */
   windStrength?: number;
   /**
@@ -115,6 +126,17 @@ export interface LeafMaterialOptions {
   metalness?: number;
   /** Shared wind time, in seconds. Pass the same object to both materials. */
   windUniform?: SharedFloatUniform;
+  /**
+   * Shared gust multiplier on the sway amplitude. Pass the same object to both
+   * materials and to the ambient audio.
+   *
+   * This is the seam that keeps the sound of the wind and the movement of the
+   * trees the same event. The GLSL sway function and the audio both scale off
+   * this one number, so a gust that bends the canopy is by construction the gust
+   * that swells the wind layer - there is no second model of the wind that can
+   * drift out of agreement with the first.
+   */
+  windStrengthUniform?: SharedFloatUniform;
   /** Peak sway at ten metres up, in metres. Zero disables the sway. */
   windStrength?: number;
   /** Height of this tree type, in metres. Used to normalise the droop. */
@@ -173,6 +195,7 @@ const SWAY_GLSL = /* glsl */ `
   // the whole program rather than warning about it.
   uniform float uWindTime;
   uniform float uWindStrength;
+  uniform float uWindGust;
 
   // Horizontal sway for a vertex h metres above its own tree's base.
   //
@@ -182,9 +205,15 @@ const SWAY_GLSL = /* glsl */ `
   //
   // The phase is the instance's world position, so two trees standing next to
   // each other are at different points of the wave and never swing together.
+  //
+  // uWindGust scales the whole amplitude rather than adding to it, so a calm
+  // moment is still calm - it is the same wind, quieter - rather than the same
+  // wind plus a wobble. It is written once per frame from JavaScript by the
+  // forest, and the ambient audio reads the same value, which is what makes the
+  // sound and the movement one event rather than two that happen to coincide.
   vec2 astraSway( float h, vec3 instanceOrigin ) {
     vec2 phase = instanceOrigin.xz * 0.09;
-    float amp = uWindStrength * h * h * 0.012;
+    float amp = uWindStrength * uWindGust * h * h * 0.012;
     vec2 dir = vec2(
       astraSimplex2D( phase + vec2( uWindTime * 0.4, 0.0 ), 3.0 ),
       astraSimplex2D( phase + vec2( uWindTime * 0.4, 19.0 ), 8.0 )
@@ -194,8 +223,8 @@ const SWAY_GLSL = /* glsl */ `
 `;
 
 /** Options after defaults have been applied. */
-type ResolvedBark = Required<Omit<BarkMaterialOptions, 'windUniform'>>;
-type ResolvedLeaf = Required<Omit<LeafMaterialOptions, 'windUniform'>>;
+type ResolvedBark = Required<Omit<BarkMaterialOptions, 'windUniform' | 'windStrengthUniform'>>;
+type ResolvedLeaf = Required<Omit<LeafMaterialOptions, 'windUniform' | 'windStrengthUniform'>>;
 
 /**
  * Build the bark material.
@@ -226,9 +255,10 @@ export function createBarkMaterial(options: BarkMaterialOptions = {}): MeshStand
     side: FrontSide,
   };
 
+  const gust = options.windStrengthUniform ?? { value: 1 };
   const material = new MeshStandardMaterial(params);
   material.onBeforeCompile = (shader) => {
-    patchBarkShader(shader, o, wind);
+    patchBarkShader(shader, o, wind, gust);
   };
   material.customProgramCacheKey = () => BARK_PROGRAM_KEY;
   return material;
@@ -261,9 +291,10 @@ export function createLeafMaterial(options: LeafMaterialOptions = {}): MeshStand
     side: DoubleSide,
   };
 
+  const gust = options.windStrengthUniform ?? { value: 1 };
   const material = new MeshStandardMaterial(params);
   material.onBeforeCompile = (shader) => {
-    patchLeafShader(shader, o, wind);
+    patchLeafShader(shader, o, wind, gust);
   };
   material.customProgramCacheKey = () => LEAF_PROGRAM_KEY;
   return material;
@@ -285,6 +316,7 @@ export function patchBarkShader(
   },
   options: ResolvedBark,
   wind: SharedFloatUniform = { value: 0 },
+  gust: SharedFloatUniform = { value: 1 },
 ): void {
   shader.uniforms.uPlateScale = { value: options.plateScale };
   shader.uniforms.uPlateDepth = { value: options.plateDepth };
@@ -293,6 +325,7 @@ export function patchBarkShader(
   shader.uniforms.uNoiseSeed = { value: options.noiseSeed };
   shader.uniforms.uWindTime = wind;
   shader.uniforms.uWindStrength = { value: options.windStrength };
+  shader.uniforms.uWindGust = gust;
   /* ---------------------------------------------------------------- vertex */
 
   shader.vertexShader = shader.vertexShader.replace(
@@ -472,6 +505,7 @@ export function patchLeafShader(
   },
   options: ResolvedLeaf,
   wind: SharedFloatUniform = { value: 0 },
+  gust: SharedFloatUniform = { value: 1 },
 ): void {
   shader.uniforms.uClusterScale = { value: options.clusterScale };
   shader.uniforms.uLeafCutout = { value: options.cutout };
@@ -480,6 +514,7 @@ export function patchLeafShader(
   shader.uniforms.uNoiseSeed = { value: options.noiseSeed };
   shader.uniforms.uWindTime = wind;
   shader.uniforms.uWindStrength = { value: options.windStrength };
+  shader.uniforms.uWindGust = gust;
   // These two are read with `?? 0` rather than taken raw: a caller spreading
   // `{ treeHeight: undefined }` over the defaults would otherwise put
   // `undefined` into the uniform, and `clamp( y / undefined )` is a NaN that
@@ -697,7 +732,12 @@ export function barkShaderSources(options: BarkMaterialOptions = {}): {
     fragmentShader: BASELINE_FRAGMENT_SHADER,
     uniforms: {} as Record<string, unknown>,
   };
-  patchBarkShader(shader, { ...DEFAULT_BARK_MATERIAL_OPTIONS, ...options }, options.windUniform);
+  patchBarkShader(
+    shader,
+    { ...DEFAULT_BARK_MATERIAL_OPTIONS, ...options },
+    options.windUniform,
+    options.windStrengthUniform,
+  );
   return shader;
 }
 
@@ -712,7 +752,12 @@ export function leafShaderSources(options: LeafMaterialOptions = {}): {
     fragmentShader: BASELINE_FRAGMENT_SHADER,
     uniforms: {} as Record<string, unknown>,
   };
-  patchLeafShader(shader, { ...DEFAULT_LEAF_MATERIAL_OPTIONS, ...options }, options.windUniform);
+  patchLeafShader(
+    shader,
+    { ...DEFAULT_LEAF_MATERIAL_OPTIONS, ...options },
+    options.windUniform,
+    options.windStrengthUniform,
+  );
   return shader;
 }
 
