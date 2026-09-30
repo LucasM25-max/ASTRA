@@ -16,6 +16,7 @@ import {
 } from '../src/debug/DebugOverlay';
 import { CameraController, DEFAULT_CAMERA_DISTANCE, ORBIT_MOUSE_BUTTON } from '../src/renderer/CameraController';
 import {
+  PLAYER_FOOT_OFFSET,
   PLAYER_HALF_HEIGHT,
   PLAYER_RADIUS,
 } from '../src/player/Player';
@@ -425,8 +426,13 @@ describe('render loop -> fixed timestep -> physics', () => {
       1,
     );
 
-    // And the mesh follows it, because the render path ran every frame.
-    expect(rig.world.player.mesh.position.y).toBe(rig.world.player.position.y);
+    // And the mesh follows it, because the render path ran every frame - offset
+    // by the foot distance, since the body's origin is the capsule's midpoint
+    // and the rig's origin is the soles. See the note in Player.ts.
+    expect(rig.world.player.mesh.position.y).toBeCloseTo(
+      rig.world.player.position.y - PLAYER_FOOT_OFFSET,
+      10,
+    );
   });
 
   it('freezes physics entirely when game time is paused', async () => {

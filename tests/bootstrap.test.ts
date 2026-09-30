@@ -652,8 +652,20 @@ describe('bootstrap movement (Step 1.4)', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space', key: ' ' }));
     window.dispatchEvent(new KeyboardEvent('keyup', { code: 'Space', key: ' ' }));
 
-    // Airborne on the very next frame, and already off the ground.
-    await nextFrame();
+    // Airborne on the first fixed step after the press, and already off the
+    // ground.
+    //
+    // Waiting for a *frame* is not enough, and this is not a theoretical
+    // objection: the engine runs its fixed update off an accumulator, so a frame
+    // whose delta lands just under the timestep runs no step at all, and under
+    // load jsdom's rAF drifts far enough to land there regularly - the assertion
+    // below then sees a character that has not been stepped yet and fails on a
+    // jump that works fine. Wait for the step the jump is actually applied in.
+    const steps = handle.physics.stepCount;
+    for (let i = 0; i < 20 && handle.physics.stepCount === steps; i += 1) {
+      await nextFrame();
+    }
+    expect(handle.physics.stepCount).toBeGreaterThan(steps);
     expect(handle.movement.isGrounded).toBe(false);
     expect(handle.worldScene.player.position.y).toBeGreaterThan(rest);
 

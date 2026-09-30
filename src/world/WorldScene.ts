@@ -407,7 +407,11 @@ export class WorldScene {
     this.stream.update(delta, focus);
     this.forest.update(delta, focus);
     this.corruption.update(delta, focus);
-    this.player.syncMesh();
+    // Reconcile the character with its body and advance its clips. The delta is
+    // the same scaled game time everything else here runs on, so the character
+    // slows and freezes with the world during time dilation rather than
+    // striding on through a frozen scene.
+    this.player.syncMesh(delta);
   }
 
   /**

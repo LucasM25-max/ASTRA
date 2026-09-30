@@ -116,8 +116,8 @@ export const MAX_TIME_SCALE = 2.5;
  * speed - the cycle length cancels out - so the cycle is free to be set for
  * readability and the swing is what actually trades stride against cadence.
  */
-const WALK_SWING = 0.8;
-const RUN_SWING = 0.92;
+const WALK_SWING = 0.805;
+const RUN_SWING = 0.935;
 
 /** How far the arms counter-swing, in radians. */
 const WALK_ARM_SWING = 0.55;
@@ -529,13 +529,19 @@ function buildStrideClip(
     thighL.push([swing * o.legSwing, 0, 0]);
     thighR.push([-swing * o.legSwing, 0, 0]);
 
-    // Shins: bend most when the leg is swinging through, i.e. when the thigh is
-    // near its extreme and the foot has to clear the ground. The knee never
-    // straightens completely, because a locked knee at this scale reads as a
-    // mannequin's.
-    const clearance = Math.max(0, Math.cos(phase));
-    shinL.push([o.kneeBend * (0.45 + clearance), 0, 0]);
-    shinR.push([o.kneeBend * (0.45 + Math.max(0, Math.cos(phase + Math.PI))), 0, 0]);
+    // Shins.
+    //
+    // The knee is straightest at mid-stance and most bent at mid-swing, and the
+    // shape that says so is a raised cosine peaking half a cycle away from the
+    // thigh's zero crossing. Getting this backwards is the defect this replaces:
+    // the old formula peaked when the thigh was vertical, which is exactly when
+    // the leg is bearing the whole character's weight, so the knee folded at the
+    // one moment it had to be locked. A raised cosine that never reaches zero
+    // keeps a slight bend throughout, because a completely locked knee at this
+    // scale reads as a mannequin's.
+    const kneeBendAt = (p: number) => o.kneeBend * (0.12 + 0.88 * (1 - Math.cos(p)) * 0.5);
+    shinL.push([kneeBendAt(phase), 0, 0]);
+    shinR.push([kneeBendAt(phase + Math.PI), 0, 0]);
 
     // Arms oppose the legs.
     //
@@ -557,7 +563,16 @@ function buildStrideClip(
     spine.push([o.lean, Math.sin(phase) * 0.05, 0]);
 
     // Bob: two per cycle, highest as the legs pass.
-    hips.push([0, Math.abs(Math.cos(phase)) * o.bob * p.height - o.bob * p.height * 0.5, 0]);
+    //
+    // The peak is pinned to the *rest* height rather than centred on it, and
+    // that is load-bearing. At mid-stance the leg is straight and bearing the
+    // whole character, so the hip is at its highest and the foot is at its
+    // lowest - which means the peak has to be exactly the rest height or the
+    // sole never reaches the ground and the character glides. Centred instead,
+    // the peak sat a full amplitude above rest and the boots floated three
+    // centimetres clear of the terrain for the whole cycle.
+    const amplitude = o.bob * p.height;
+    hips.push([0, amplitude * (Math.abs(Math.cos(phase)) - 1), 0]);
   }
 
   const tracks: KeyframeTrack[] = [

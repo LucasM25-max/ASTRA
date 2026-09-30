@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Color, Scene, Vector3 } from 'three';
 import { PhysicsWorld } from '../src/physics/PhysicsWorld';
 import {
+  PLAYER_FOOT_OFFSET,
   PLAYER_HALF_HEIGHT,
   PLAYER_HEIGHT,
   PLAYER_RADIUS,
@@ -347,7 +348,11 @@ describe('WorldScene', () => {
 
     world.update(1 / 60);
 
-    expect(world.player.mesh.position.toArray()).toEqual([1, 2, 3]);
+    // X and Z copy straight across. Y is offset by the foot distance, because
+    // the body's origin is the capsule's midpoint while the rig's origin is the
+    // ground - see the note in Player.ts. A mesh that copied Y verbatim would
+    // leave the character standing half a body inside the terrain.
+    expect(world.player.mesh.position.toArray()).toEqual([1, 2 - PLAYER_FOOT_OFFSET, 3]);
   });
 
   it('drops the player onto the ground through the fixed path', async () => {
@@ -380,16 +385,22 @@ describe('WorldScene', () => {
     // still sitting where it was created, which is the spawn height the
     // terrain gave it, not the settled height.
     const spawnY = world.player.mesh.position.y;
-    expect(spawnY).toBeGreaterThan(surface);
-    expect(spawnY).toBeGreaterThan(world.player.position.y);
+    // The comparison is against the body height the mesh implies, not the mesh's
+    // own Y: the two differ by exactly the foot offset, and comparing the raw
+    // values would be comparing a feet height against a centre height.
+    expect(spawnY + PLAYER_FOOT_OFFSET).toBeGreaterThan(surface + PLAYER_HALF_HEIGHT);
+    expect(spawnY + PLAYER_FOOT_OFFSET).toBeGreaterThan(world.player.position.y);
 
     world.update(0);
-    // The mesh is an exact copy of the body, and Rapier's contact solver
-    // leaves a few 1e-5 of margin above the ground, so the rest height is
+    // The mesh follows the body exactly, less the foot offset. Rapier's contact
+    // solver leaves a few 1e-5 of margin above the ground, so the rest height is
     // asserted to 3dp rather than treated as exact.
-    expect(world.player.mesh.position.y).toBe(world.player.position.y);
     expect(world.player.mesh.position.y).toBeCloseTo(
-      surface + PLAYER_HALF_HEIGHT + PLAYER_RADIUS / world.terrain.normalAt(0, 0).y,
+      world.player.position.y - PLAYER_FOOT_OFFSET,
+      10,
+    );
+    expect(world.player.mesh.position.y).toBeCloseTo(
+      surface + PLAYER_HALF_HEIGHT + PLAYER_RADIUS / world.terrain.normalAt(0, 0).y - PLAYER_FOOT_OFFSET,
       3,
     );
   });
@@ -400,7 +411,12 @@ describe('WorldScene', () => {
     const disposeTerrain = vi.spyOn(world.terrain.mesh.geometry, 'dispose');
     const disposeSky = vi.spyOn(world.sky.mesh.geometry, 'dispose');
     const disposeLights = vi.spyOn(world.lighting.sun, 'dispose');
-    const disposePlayerGeometry = vi.spyOn(world.player.mesh.geometry, 'dispose');
+    // The player is a rig now, not one capsule: it owns a geometry per part, and
+    // every one of them has to go or the GPU keeps the whole character.
+    const disposePlayerParts = world.player.character.parts.map((part) =>
+      vi.spyOn(part.geometry, 'dispose'),
+    );
+    expect(disposePlayerParts.length).toBeGreaterThan(15);
 
     world.dispose();
 
@@ -410,7 +426,12 @@ describe('WorldScene', () => {
     expect(disposeTerrain).toHaveBeenCalledTimes(1);
     expect(disposeSky).toHaveBeenCalledTimes(1);
     expect(disposeLights).toHaveBeenCalledTimes(1);
-    expect(disposePlayerGeometry).toHaveBeenCalledTimes(1);
+    // Each part's geometry is disposed exactly once. Twice would be a double
+    // free, and not at all would leak the character for the lifetime of the
+    // page - and a rig has enough parts that a leak here is not a rounding error.
+    for (const spy of disposePlayerParts) {
+      expect(spy).toHaveBeenCalledTimes(1);
+    }
 
     // The player's body and every trunk collider are gone from the simulation.
     // A capsule that is removed without its body leaves a fixed body behind:

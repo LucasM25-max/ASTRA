@@ -27,9 +27,11 @@
 import { describe, expect, it } from 'vitest';
 import { AnimationMixer, Euler, LoopPingPong, LoopRepeat, MathUtils, Object3D, Vector3 } from 'three';
 import { CharacterGenerator, type BoneName } from '../src/player/CharacterGenerator';
+import { RUN_SPEED as CONTROLLER_RUN_SPEED, WALK_SPEED as CONTROLLER_WALK_SPEED } from '../src/player/MovementController';
 import {
   CharacterAnimator,
   IDLE_CYCLE,
+  IDLE_SPEED,
   MAX_TIME_SCALE,
   MIN_TIME_SCALE,
   RUN_SPEED,
@@ -553,6 +555,21 @@ describe('ownership of the root transform', () => {
 });
 
 /* ========================================================================== */
+
+describe('agreement with the movement controller', () => {
+  it('blends at exactly the speeds the controller moves at', () => {
+    // The thresholds are duplicated rather than imported, because importing
+    // MovementController here would close a cycle: it reads Player, which builds
+    // the animator. So the agreement has to be asserted instead, or the day one
+    // of them changes the character would cross-fade at a speed the body never
+    // reaches and spend its whole life in the wrong state.
+    expect(WALK_SPEED).toBe(CONTROLLER_WALK_SPEED);
+    expect(RUN_SPEED).toBe(CONTROLLER_RUN_SPEED);
+    expect(IDLE_SPEED).toBeGreaterThan(0);
+    expect(IDLE_SPEED).toBeLessThan(WALK_SPEED);
+    expect(WALK_SPEED).toBeLessThan(RUN_SPEED);
+  });
+});
 
 describe('loop modes', () => {
   it('ping-pongs the idle and repeats the strides', () => {

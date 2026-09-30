@@ -262,8 +262,9 @@ interface Part {
 export class CharacterGenerator {
   private readonly options: CharacterGeneratorOptions;
   private readonly materials: CharacterMaterials;
-  private readonly ownsMaterials: boolean;
   private readonly parts: Part[] = [];
+  /** Materials the caller supplied, and therefore still owns. */
+  private readonly passedIn: Set<CharacterMaterials[keyof CharacterMaterials]>;
   private disposed = false;
 
   constructor(options: CharacterGeneratorOptions = {}) {
@@ -278,18 +279,34 @@ export class CharacterGenerator {
       leather: options.materials?.leather ?? created.leather,
       steel: options.materials?.steel ?? created.steel,
     };
-    // Only dispose what this generator actually created. If the caller passed
-    // materials in, they own them.
-    this.ownsMaterials =
-      !options.materials?.skin &&
-      !options.materials?.chainMail &&
-      !options.materials?.leather &&
-      !options.materials?.steel;
+    // Which of the four the caller supplied. Whoever creates a material owns it,
+    // so disposing one that was passed in frees it out from under the system
+    // that is still using it.
+    this.passedIn = new Set(
+      [
+        options.materials?.skin,
+        options.materials?.chainMail,
+        options.materials?.leather,
+        options.materials?.steel,
+      ].filter((m): m is CharacterMaterials[keyof CharacterMaterials] => m !== undefined),
+    );
   }
 
   /** Build the whole rig. */
   generate(): CharacterRig {
-    const p = characterProportions(this.options.height ?? CHARACTER_HEIGHT);
+    const height = this.options.height ?? CHARACTER_HEIGHT;
+    // Validated here rather than in the constructor, because a non-finite height
+    // does not fail loudly: it propagates NaN through every proportion, every
+    // bone position and every matrix, and the character simply vanishes with
+    // nothing in the log to say why. Failing at the one point that knows the
+    // number is meant to be a height is the cheapest place to catch it.
+    if (!Number.isFinite(height) || height <= 0) {
+      throw new RangeError(
+        `[CharacterGenerator] height must be a positive number, received ${String(height)}`,
+      );
+    }
+
+    const p = characterProportions(height);
     const root = new Group();
     root.name = 'character';
 
@@ -314,18 +331,78 @@ export class CharacterGenerator {
     const head = addBone('head', neck, 0, p.head * 0.55, 0);
 
     /* ---- the torso ------------------------------------------------------- */
-    // Pelvis. A box, wider at the hips than at the waist, so the silhouette
-    // narrows upwards the way a torso does.
-    this.addBox(hips, p.hipHalf * 2.0, p.spine * 1.05, p.torso * 0.42, this.materials.leather, 0, p.spine * 0.52, 0);
+    // Every torso part is placed by the absolute height it has to occupy, not by
+    // an offset from its bone, and the difference is not cosmetic. The bones sit
+    // at the *top* of their section - `chest` is at the shoulder line, `neck` at
+    // the chin - so "half a height above the bone" puts the ribcage over the head
+    // and the head above the crown, which is exactly what this layout replaces.
+    // `spanOf` turns an absolute region into the offset and length the builders
+    // want, so the region is what gets read and the arithmetic is done once.
+    // The bone heights, accumulated down the chain.
+    //
+    // These are *not* `bone.position.y`: that is the offset from the bone's
+    // parent, so `chest.position.y` is `p.chest` - the length of the chest
+    // section - and not the height of the chest. Reading it as a height puts
+    // every torso part a whole section out, which is how the neck ended up at
+    // y = 3 m. The chain is short enough to write out, and it is the same chain
+    // `characterProportions` builds, so the two cannot drift.
+    const hipsY = p.hip;
+    const spineY = p.hip + p.spine;
+    const chestY = p.shoulder;
+    const neckY = p.chin;
+    const headY = p.chin + p.head * 0.55;
+
+    const spanOf = (boneY: number, bottom: number, top: number) => ({
+      y: (bottom + top) / 2 - boneY,
+      length: top - bottom,
+    });
+
+    // Pelvis: a box, wider at the hips than at the waist, so the silhouette
+    // narrows upwards the way a torso does. Leather, because a belt goes here.
+    const pelvis = spanOf(hipsY, hipsY, hipsY + p.spine * 0.92);
+    this.addBox(hips, p.hipHalf * 2.0, pelvis.length, p.torso * 0.42, this.materials.leather, 0, pelvis.y, 0);
+
     // Abdomen, under the mail.
-    this.addCylinder(spine, p.shoulderHalf * 0.6, p.shoulderHalf * 0.52, p.spine * 1.1, this.materials.skin, 0, p.spine * 0.55, 0);
-    // Ribcage.
-    this.addBox(chest, p.shoulderHalf * 2.0, p.chest * 1.05, p.torso * 0.46, this.materials.skin, 0, p.chest * 0.52, 0);
+    const abdomen = spanOf(spineY, hipsY + p.spine * 0.4, chestY - p.chest * 0.6);
+    this.addCylinder(spine, p.shoulderHalf * 0.6, p.hipHalf * 0.95, abdomen.length, this.materials.skin, 0, abdomen.y, 0);
+    this.addMailCylinder(
+      spine,
+      p.shoulderHalf * 0.6 * (1 + MAIL_STANDOFF),
+      p.hipHalf * 0.95 * (1 + MAIL_STANDOFF),
+      abdomen.length,
+      0,
+      abdomen.y,
+      0,
+    );
+
+    // Ribcage, and the chain mail over it. The plan asks for mail on the torso as
+    // well as the limbs, and it has to be a cylinder rather than the box this
+    // used to be: a box inside a cylinder pokes through at the corners for any
+    // radius that fits, so the mail would have to be as wide as the box's
+    // diagonal. Rounding the chest is the cheaper of the two, and the pauldrons
+    // carry the broad-shoulder silhouette instead.
+    const ribcage = spanOf(chestY, chestY - p.chest * 0.95, chestY);
+    this.addCylinder(chest, p.shoulderHalf * 0.62, p.shoulderHalf * 0.86, ribcage.length, this.materials.skin, 0, ribcage.y, 0);
+    this.addMailCylinder(
+      chest,
+      p.shoulderHalf * 0.62 * (1 + MAIL_STANDOFF),
+      p.shoulderHalf * 0.86 * (1 + MAIL_STANDOFF),
+      ribcage.length,
+      0,
+      ribcage.y,
+      0,
+    );
+
     // Neck.
-    this.addCylinder(neck, p.head * 0.22, p.head * 0.24, p.neck, this.materials.skin, 0, p.neck * 0.5, 0);
+    const neckSpan = spanOf(neckY, chestY, p.chin);
+    this.addCylinder(neck, p.head * 0.22, p.head * 0.24, neckSpan.length, this.materials.skin, 0, neckSpan.y, 0);
+
     // Head. A box, narrower front to back than side to side: a sphere reads as a
     // toy at this scale, and a box with the right proportions reads as a jaw.
-    this.addBox(head, p.head * 0.72, p.head, p.head * 0.8, this.materials.skin, 0, p.head * 0.5, 0);
+    // The span runs chin to crown, so the top of the skull lands exactly on the
+    // character's total height.
+    const skull = spanOf(headY, p.chin, p.height);
+    this.addBox(head, p.head * 0.72, skull.length, p.head * 0.8, this.materials.skin, 0, skull.y, 0);
 
     /* ---- limbs ----------------------------------------------------------- */
     for (const side of ['L', 'R'] as const) {
@@ -336,12 +413,22 @@ export class CharacterGenerator {
       const lowerArm = addBone(`lowerArm.${side}`, upperArm, 0, -p.upperArm, 0);
       addBone(`hand.${side}`, lowerArm, 0, -p.lowerArm, 0);
 
-      const thigh = addBone(`thigh.${side}`, hips, sign * p.hipHalf, -0.04, 0);
+      // No vertical offset here, and that is load-bearing rather than tidy: the
+      // proportions are built downwards from the crown so they sum to `height`
+      // exactly, and a 4 cm socket offset on the thigh pushes the whole leg chain
+      // down by 4 cm - which put the ankle 4 cm short of `p.ankle` and sank the
+      // boots' soles below the ground. The chain now lands the ankle exactly on
+      // `p.ankle` and the sole exactly on y = 0.
+      const thigh = addBone(`thigh.${side}`, hips, sign * p.hipHalf, 0, 0);
       const shin = addBone(`shin.${side}`, thigh, 0, -p.thigh, 0);
       const foot = addBone(`foot.${side}`, shin, 0, -p.shin, 0);
 
       // Pauldron: chain mail over a slightly larger cylinder, as the plan asks.
-      this.addMailCylinder(shoulder, ARM_RADIUS * 2.0, ARM_RADIUS * 1.8, p.upperArm * 0.36, 0, -p.upperArm * 0.18, 0);
+      // The radius is held just inside the collider's, so the widest part of the
+      // character is the pauldron and it still clears the capsule by a
+      // centimetre - a shoulder wider than the body catches on doorways the
+      // player walks straight through.
+      this.addMailCylinder(shoulder, ARM_RADIUS * 1.8, ARM_RADIUS * 1.62, p.upperArm * 0.36, 0, -p.upperArm * 0.18, 0);
 
       // Arm. The skin cylinder is the limb; the mail cylinder stands off it.
       this.addCylinder(upperArm, ARM_RADIUS, ARM_RADIUS * 0.86, p.upperArm, this.materials.skin, 0, -p.upperArm * 0.5, 0);
@@ -392,15 +479,41 @@ export class CharacterGenerator {
         swordGrip.add(sword);
         // In the hand the blade runs along the forearm, so it points forward and
         // slightly down - the way a greatsword is actually held, not straight up.
-        sword.position.set(0, 0, 0.04);
-        sword.quaternion.copy(orientYTo(new Vector3(0, 0, 1)));
+        // A little way out to the character's right as well, so the pommel
+        // clears the thigh the arm hangs beside.
+        sword.position.set(0.09, 0, 0.04);
+        // Forward, slightly up, and slightly out to the character's right.
+        //
+        // The X component is the one that is easy to leave out: with the blade
+        // pointing straight forward it runs through the forearm it is held in,
+        // because the grip sits on the forearm's axis. Angling it out by about
+        // nine degrees clears the arm for the whole length of the blade. The Y
+        // component stops the tip dragging through the terrain the moment the
+        // sword leaves the back.
+        sword.quaternion.copy(orientYTo(new Vector3(0.15, 0.3, 0.94)));
       },
       sheatheSword() {
         if (sword.parent === chest) return;
         chest.add(sword);
-        // Across the back, grip at the right shoulder, tip down at the left hip.
-        sword.position.set(0.1, p.shoulder * 0.92, -p.torso * 0.36);
-        sword.quaternion.copy(orientYTo(new Vector3(-0.45, -0.89, -0.06)));
+        // Across the back, pommel at the right shoulder, tip down past the left
+        // hip.
+        //
+        // The position is *relative to the chest bone*, whose origin is the
+        // shoulder line at `p.shoulder`. Writing an absolute height here puts the
+        // sword at shoulder + shoulder - it used to float 1.36 m above the
+        // shoulder, behind the character's head, pointing down at the ground.
+        //
+        // The direction is the part that needed measuring. A 1.45 m blade slung
+        // from a 1.48 m shoulder cannot reach the hip and stop: the shoulder and
+        // the opposite hip are only 0.63 m apart, so a straight blade has ~0.8 m
+        // left over and has to go somewhere. Hanging it straight down puts it
+        // exactly where the legs swing - the run's stride sweeps 86 cm behind
+        // the hip, and the blade passed through the shin on most frames. So it
+        // angles out to the character's left as it descends, which is also how a
+        // real back-slung sword sits, and the flat of the blade faces the back
+        // because the direction's Z component is kept small.
+        sword.position.set(0.12, 0.05, -0.28);
+        sword.quaternion.copy(orientYTo(new Vector3(-0.42, -0.9, -0.07)));
       },
       dispose() {
         generator.disposeRig(root);
@@ -421,10 +534,25 @@ export class CharacterGenerator {
   disposeRig(root: Group): void {
     if (this.disposed) return;
     this.disposed = true;
-    for (const part of this.parts) part.geometry.dispose();
-    if (this.ownsMaterials) {
-      for (const material of Object.values(this.materials)) material.dispose();
+
+    // Dispose the materials the parts actually wear, not the four templates.
+    //
+    // Every chain mail part carries its own instance, because the shader needs
+    // that part's real circumference and height - so `this.materials.chainMail`
+    // is never worn by anything, and disposing the template set leaked every
+    // mail material on the character. Both sets have to go: the templates this
+    // generator created (one of them is otherwise orphaned with nothing pointing
+    // at it), and everything a part wears that was not passed in.
+    const toDispose = new Set<CharacterMaterials[keyof CharacterMaterials]>();
+    for (const material of Object.values(this.materials)) {
+      if (!this.passedIn.has(material)) toDispose.add(material);
     }
+    for (const part of this.parts) {
+      part.geometry.dispose();
+      if (!this.passedIn.has(part.material)) toDispose.add(part.material);
+    }
+    for (const material of toDispose) material.dispose();
+
     this.parts.length = 0;
     root.clear();
   }
@@ -515,19 +643,23 @@ export class CharacterGenerator {
    * sheathed and the drawn transform orient that +Y at a direction chosen for
    * what it should read as, which is why neither is a set of magic Euler angles.
    *
-   * The proportions matter more than the detail: a greatsword is roughly as long
+   * The proportions matter more than the detail. A greatsword is roughly as long
    * as its owner is tall, which is what makes the silhouette read at distance
-   * (style guide Rule C) and what gives the scale contrast against the trees.
+   * (style guide Rule C) and what gives the scale contrast against the trees -
+   * but that is the *whole* sword. The blade alone is nearer two thirds of the
+   * height: at 0.95 the blade was 1.71 m on a 1.8 m character, so slung from the
+   * shoulder it ran a third of a metre through the ground. 0.66 with a 0.26 grip
+   * gives a 1.45 m sword whose tip clears the terrain with room to spare.
    */
   private buildSword(p: CharacterProportions): Group {
     const sword = new Group();
     sword.name = 'greatsword';
 
-    const bladeLength = p.height * 0.95;
+    const bladeLength = p.height * 0.66;
     const bladeWidth = 0.055;
     const bladeDepth = 0.018;
     const guardWidth = 0.26;
-    const gripLength = 0.2;
+    const gripLength = 0.26;
 
     const blade = this.addBox(sword, bladeWidth, bladeLength, bladeDepth, this.materials.steel, 0, gripLength + bladeLength * 0.5, 0);
     blade.name = 'greatsword-blade';
