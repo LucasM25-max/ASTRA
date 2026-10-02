@@ -450,6 +450,9 @@ export class Forest {
         heightAt,
         normalAt,
         distanceToStream,
+        // The rim belt needs to know how big the world is, and it applies with
+        // or without a stream - a forest with no water still has an edge.
+        sizeMetres: options.size ?? 500,
         pollutionAt,
         // Without a spline there is no stream to be corrupted by, so the whole
         // forest is clean. Returning a constant zero rather than omitting the
@@ -482,6 +485,10 @@ export class Forest {
     return {
       heightAt,
       normalAt,
+      // The rim belt, which closes the forest in against the world's boundary
+      // walls. Present in both branches: a forest with no stream still has an
+      // edge, and a bald ridge at that edge is the thing the belt prevents.
+      sizeMetres: size,
       distanceToStream:
         distanceToStream ?? ((x, z) => field.distance[at(x, z)]),
       // The three pollution zones the plan specifies, keyed on how far along

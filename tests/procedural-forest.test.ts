@@ -107,6 +107,61 @@ describe('forest density', () => {
     expect(forestDensityAt(0, 0, field)).toBe(0);
   });
 
+  it('closes the forest in against the world edge', () => {
+    // Step 2.9's boundary belt. The rim ramp lifts and roughens the outer ring
+    // of the terrain, and the hill thinning above turns that into bare ground -
+    // so without this term the edge of the world is a bald ridge with a hard
+    // cut beyond it. Measured on a field with a known extent.
+    const field: ForestField = {
+      heightAt: () => 0,
+      normalAt: () => ({ x: 0, y: 1, z: 0 }),
+      sizeMetres: 500,
+    };
+    const half = 250;
+    const atEdge = forestDensityAt(0, half - 3, field);
+    const at25 = forestDensityAt(0, half - 25, field);
+    const at100 = forestDensityAt(0, half - 100, field);
+    const inMiddle = forestDensityAt(0, 0, field);
+
+    expect(atEdge).toBeGreaterThan(at25);
+    expect(at25).toBeGreaterThan(at100);
+    // And the belt is a real multiplier, not a rounding error.
+    expect(atEdge / inMiddle).toBeGreaterThan(2);
+    // It reaches zero exactly at the belt's outer edge rather than stepping,
+    // so the transition has no corner in it.
+    const belt = DEFAULT_FOREST_PLACEMENT.rimBeltWidth;
+    expect(forestDensityAt(0, half - belt - 1, field)).toBeCloseTo(inMiddle, 6);
+  });
+
+  it('does not apply the rim belt to a field with no known extent', () => {
+    // `sizeMetres` is optional and every existing caller omits it. Without it
+    // there is no rim term, and the forest behaves exactly as it did before
+    // the boundary work - a caller must not get a belt it did not ask for.
+    const bare: ForestField = { heightAt: () => 0 };
+    const half = 250;
+    expect(forestDensityAt(0, half - 3, bare)).toBeCloseTo(forestDensityAt(0, 0, bare), 10);
+    // And a nonsense extent is treated the same way rather than producing NaN.
+    const nonsense: ForestField = { heightAt: () => 0, sizeMetres: Number.NaN };
+    expect(Number.isFinite(forestDensityAt(0, half - 3, nonsense))).toBe(true);
+  });
+
+  it('beats the hill thinning at the rim, which is the whole point', () => {
+    // The belt multiplies rather than adds, because it has to survive the
+    // `1 - smoothstep(hillStart, hillEnd, h)` term that would otherwise leave
+    // the raised rim bare. A field that is high AND at the edge must still
+    // grow something.
+    const field: ForestField = {
+      // 12 m up: half-thinned by the default hill term.
+      heightAt: () => 12,
+      normalAt: () => ({ x: 0, y: 1, z: 0 }),
+      sizeMetres: 500,
+    };
+    const withBelt = forestDensityAt(0, 247, field);
+    const withoutBelt = forestDensityAt(0, 247, field, { rimDensity: 1 });
+    expect(withoutBelt).toBeGreaterThan(0);
+    expect(withBelt).toBeGreaterThan(withoutBelt * 2);
+  });
+
   it('works with only a height function', () => {
     // The slope and stream samplers are optional. Without them there is simply
     // no slope rejection and no stream boost.

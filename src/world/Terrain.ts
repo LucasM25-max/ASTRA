@@ -27,6 +27,7 @@
 
 import {
   DoubleSide,
+  Group,
   Mesh,
   MeshStandardMaterial,
   type BufferGeometry,
@@ -35,8 +36,9 @@ import {
 import {
   BIOME_COLORS,
   TERRAIN_SIZE,
-  buildTerrainCollisionData,
+  TERRAIN_TILES_PER_SIDE,
   buildTerrainGeometry,
+  buildTerrainTiles,
   generateTerrain,
   type TerrainData,
 } from '../procedural/TerrainGenerator';
@@ -49,7 +51,7 @@ import { StreamSpline } from '../procedural/StreamSpline';
  * Re-exported from the generator so existing imports of `TERRAIN_SIZE` keep
  * working; the generator is now the source of truth.
  */
-export { TERRAIN_SIZE, TERRAIN_RESOLUTION } from '../procedural/TerrainGenerator';
+export { TERRAIN_SIZE, TERRAIN_RESOLUTION, TERRAIN_TILES_PER_SIDE } from '../procedural/TerrainGenerator';
 
 /** The dominant biome colour, kept for callers that want "the ground colour". */
 export const DEFAULT_GROUND_COLOR = BIOME_COLORS[0];
@@ -90,6 +92,28 @@ export interface TerrainSample {
 }
 
 export class Terrain {
+  /**
+   * The ground as it is drawn: one mesh per cullable tile, in row-major order.
+   *
+   * The whole 500 m grid used to be a single mesh. Three culls per mesh
+   * against the mesh's bounding sphere, and the terrain's sphere covers the
+   * world, so the entire grid was submitted every frame regardless of where
+   * the player looked. Split into `TERRAIN_TILES_PER_SIDE^2` tiles, the ones
+   * behind and beside the camera are culled as whole objects: 141,376 of
+   * 293,378 triangles at the default camera pitch. See
+   * `buildTerrainTiles` for why the normals are copied rather than recomputed.
+   */
+  readonly tiles: Mesh<BufferGeometry, MeshStandardMaterial>[];
+
+  /**
+   * The tiles' parent, and the only object added to the scene.
+   *
+   * A Group rather than a bare list so `addTo`/`removeFrom` stay one call and
+   * so the terrain is one named thing in the scene graph.
+   */
+  readonly group: Group;
+
+  /** The complete surface as one mesh. Not added to the scene. */
   readonly mesh: Mesh<BufferGeometry, MeshStandardMaterial>;
 
   /** The stream path this terrain's valley was carved along. */
@@ -99,6 +123,14 @@ export class Terrain {
   readonly data: TerrainData;
 
   private readonly size: number;
+
+  /**
+   * The collider's arrays, copied out of the master geometry before it was
+   * disposed. Rapier reads them once during `createTerrainCollider`; keeping
+   * our own copy means the collision surface cannot be invalidated by anything
+   * that happens to the geometry afterwards.
+   */
+  private readonly collision: { vertices: Float32Array; indices: Uint32Array };
 
   constructor(options: TerrainOptions = {}) {
     this.size = options.size ?? TERRAIN_SIZE;
@@ -136,6 +168,33 @@ export class Terrain {
     // Rendered from both sides so the ground never disappears if the camera
     // dips below it during a jump or a camera-collision pull-in.
     this.mesh.material.side = DoubleSide;
+
+    // The tiles are sliced from that geometry, so they inherit every vertex
+    // attribute and every normal exactly - the culling is invisible. One
+    // material is shared by all of them: the terrain's look is driven by
+    // uniforms, and one instance means one place to write them.
+    this.tiles = buildTerrainTiles(geometry, TERRAIN_TILES_PER_SIDE).map((tileGeometry, i) => {
+      const tile = new Mesh(tileGeometry, material);
+      tile.name = `terrain-tile-${i}`;
+      tile.receiveShadow = true;
+      tile.matrixAutoUpdate = false;
+      tile.updateMatrix();
+      return tile;
+    });
+
+    this.group = new Group();
+    this.group.name = 'terrain';
+    for (const tile of this.tiles) this.group.add(tile);
+
+    // The master grid has done its job. Its arrays live on inside the tiles
+    // and inside the collider (which `collisionData` copies out below), so
+    // releasing the master's own buffers halves the terrain's memory with no
+    // loss - the tiles are the only surviving copy of the geometry.
+    this.collision = {
+      vertices: new Float32Array(geometry.getAttribute('position').array as Float32Array),
+      indices: new Uint32Array(geometry.getIndex()!.array as ArrayLike<number>),
+    };
+    geometry.dispose();
   }
 
   /** Side length in metres. */
@@ -214,18 +273,24 @@ export class Terrain {
    * makes the collision surface and the visual surface the same surface.
    */
   collisionData(): { vertices: Float32Array; indices: Uint32Array } {
-    return buildTerrainCollisionData(this.mesh.geometry);
+    return {
+      vertices: new Float32Array(this.collision.vertices),
+      indices: new Uint32Array(this.collision.indices),
+    };
   }
 
   addTo(parent: Object3D): void {
-    parent.add(this.mesh);
+    parent.add(this.group);
   }
 
   removeFrom(parent: Object3D): void {
-    parent.remove(this.mesh);
+    parent.remove(this.group);
   }
 
   dispose(): void {
+    for (const tile of this.tiles) tile.geometry.dispose();
+    this.tiles.length = 0;
+    this.group.clear();
     this.mesh.geometry.dispose();
     this.mesh.material.dispose();
   }

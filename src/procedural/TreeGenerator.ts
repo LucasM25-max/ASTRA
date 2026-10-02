@@ -222,8 +222,27 @@ export const TREE_PRESETS: Record<TreeType, TreePreset> = {
 /** Radial divisions around a branch. Six reads as round and costs 12 tris. */
 const BRANCH_RADIAL_SEGMENTS = 6;
 
-/** Rings along a branch, including both ends. */
-const BRANCH_RINGS = 3;
+/**
+ * Rings along a branch, including both ends.
+ *
+ * Two, not three. A branch is a straight tapered tube - `appendBranch` puts
+ * every ring on the line `base + dir * length * t` and perturbs only the
+ * radius - so the curve of a tree comes from chaining child branches, never
+ * from bending inside one. The third ring therefore bought exactly one extra
+ * sample of the radius noise along a tube a few centimetres across, thirty
+ * metres from the camera, at the cost of a second band of quads: 30 triangles
+ * per branch instead of 18.
+ *
+ * That difference is the near LOD's whole budget. A tree runs to the 140
+ * segment ceiling, so the bark was 4,200 triangles and a deciduous tree 5,800
+ * all told; a forest holds ~59 of them inside the 30 m near radius, which is
+ * 342,000 triangles - most of a 500K frame on wood. At two rings the same
+ * tree, with the same branches in the same places at the same lengths and
+ * radii, costs 2,520 and the near tier comes in around 105,000. No silhouette
+ * changes: what a tree looks like against the sky is decided by where its
+ * branches are, and none of that moved.
+ */
+const BRANCH_RINGS = 2;
 
 /** No branch points more than this far below horizontal. */
 const MIN_BRANCH_DROP = -0.12;

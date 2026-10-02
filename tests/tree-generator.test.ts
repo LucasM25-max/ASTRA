@@ -377,20 +377,40 @@ describe('tree geometry invariants', () => {
     for (const { type, seed, variant } of eachTree()) {
       const g = generateTree(type, seed, variant);
       // One branch costs a fixed number of vertices and triangles, so the
-      // ceiling is checkable straight off the mesh.
-      const perBranch = (3 * 6 + 1) * 1;
-      expect(vertexCount(g.bark)).toBeLessThanOrEqual(MAX_BRANCH_SEGMENTS * perBranch + 64);
-      expect(triangleCount(g.bark)).toBeLessThanOrEqual(MAX_BRANCH_SEGMENTS * 30 + 64);
+      // ceiling is checkable straight off the mesh. These mirror
+      // `appendBranch`'s tessellation: `BRANCH_RINGS` rings of
+      // `BRANCH_RADIAL_SEGMENTS` vertices, plus one tip vertex, and
+      // `(rings - 1) * radial` quads plus `radial` cap triangles. If either
+      // constant changes, this bound has to change with it - it is the thing
+      // that turns the near LOD's triangle cost into a number that can be
+      // reasoned about.
+      const rings = 2;
+      const radial = 6;
+      const perBranchVertices = rings * radial + 1;
+      const perBranchTriangles = (rings - 1) * radial * 2 + radial;
+      expect(vertexCount(g.bark)).toBeLessThanOrEqual(
+        MAX_BRANCH_SEGMENTS * perBranchVertices + 64,
+      );
+      expect(triangleCount(g.bark)).toBeLessThanOrEqual(
+        MAX_BRANCH_SEGMENTS * perBranchTriangles + 64,
+      );
     }
   });
 
   it('keeps the near LOD inside the triangle budget the plan sets', () => {
     // 3,000 triangles of wood plus 3,000 of leaves per tree is the point at
     // which forty near trees stop being affordable next to a 293k terrain.
+    //
+    // This bound was 6,000 and 4,000 until Step 2.9, which is to say the
+    // comment above it described a budget the assertion never enforced: the
+    // bark alone ran to 4,200 and a whole tree to 5,800, and a forest holds
+    // nearer sixty than forty trees inside the 30 m near radius. That is
+    // 342,000 triangles on wood - most of a 500K frame. The number below is
+    // the one the comment always meant.
     for (const { type, seed, variant } of eachTree()) {
       const g = generateTree(type, seed, variant);
-      expect(triangleCount(g.bark)).toBeLessThanOrEqual(6000);
-      expect(triangleCount(g.canopy)).toBeLessThanOrEqual(4000);
+      expect(triangleCount(g.bark)).toBeLessThanOrEqual(3000);
+      expect(triangleCount(g.canopy)).toBeLessThanOrEqual(3000);
     }
   });
 });

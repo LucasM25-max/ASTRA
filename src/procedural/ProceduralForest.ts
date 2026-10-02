@@ -123,6 +123,23 @@ export const DEFAULT_FOREST_PLACEMENT = {
   maxScale: 1.2,
   /** Maximum lean from vertical, in radians. */
   maxLean: 0.14,
+  /**
+   * How much denser the forest gets against the world's boundary walls.
+   *
+   * The rim ramp lifts and roughens the outer ring of the terrain, and the hill
+   * thinning above turns that into bare ground - so left alone the edge of the
+   * world is a bald ridge with a hard cut beyond it. This term closes the
+   * forest in instead: a belt `rimBeltWidth` metres deep where cover is
+   * `rimDensity` times what it would otherwise be.
+   *
+   * It has to be a term in the density and not a separate belt of trees,
+   * because a second placement pass would be a second forest: different LOD
+   * distances, a different wind phase, trees popping at a different moment, and
+   * a boundary the player can see.
+   */
+  rimDensity: 4.2,
+  /** How far in from the world edge the rim belt reaches, in metres. */
+  rimBeltWidth: 55,
 } as const;
 
 /* -------------------------------------------------------------------------- */
@@ -134,6 +151,15 @@ export interface ForestField {
   heightAt: (x: number, z: number) => number;
   normalAt?: (x: number, z: number) => { x: number; y: number; z: number };
   distanceToStream?: (x: number, z: number) => number;
+  /**
+   * Side length of the world this forest covers, in metres.
+   *
+   * Optional, and only read for one thing: the rim belt that closes the forest
+   * in against the world's boundary walls (Step 2.9). Without it there is no
+   * rim term, and a forest placed on a field with no known extent behaves
+   * exactly as it did before the boundary work.
+   */
+  sizeMetres?: number;
   pollutionAt?: (x: number, z: number) => number;
   /**
    * 0..1 corruption intensity.
@@ -186,6 +212,9 @@ export interface ForestPlacementOptions {
   minScale?: number;
   maxScale?: number;
   maxLean?: number;
+  /** Rim-belt multiplier and width. See `DEFAULT_FOREST_PLACEMENT`. */
+  rimDensity?: number;
+  rimBeltWidth?: number;
   /** Cap on the number of trees, as a guard against a pathological field. */
   maxTrees?: number;
 }
@@ -224,6 +253,20 @@ export function forestDensityAt(
   if (stream !== undefined) {
     if (stream < o.streamMargin) return 0;
     d *= 1 + (o.streamDensity - 1) * Math.exp(-stream / o.streamDecay);
+  }
+
+  // The rim belt, last and deliberately so. It multiplies rather than returns,
+  // because the belt has to beat the hill thinning above - a rim that only
+  // added to whatever was left would still leave a bald ridge, which is the
+  // thing it exists to prevent.
+  const size = field.sizeMetres;
+  if (size !== undefined && Number.isFinite(size) && size > 0) {
+    const half = size / 2;
+    const edge = Math.min(half - Math.abs(x), half - Math.abs(z));
+    if (edge < o.rimBeltWidth) {
+      const belt = 1 - Math.max(0, edge) / o.rimBeltWidth;
+      d *= 1 + (o.rimDensity - 1) * belt * belt;
+    }
   }
 
   return Math.max(0, d);

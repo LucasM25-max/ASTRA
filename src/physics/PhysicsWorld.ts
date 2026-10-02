@@ -142,6 +142,16 @@ export interface TrunkColliderOptions {
   readonly friction?: number;
 }
 
+/** Everything `createBoxCollider` needs. */
+export interface BoxColliderOptions {
+  /** Half-extents of the cuboid, metres. All strictly positive. */
+  halfExtents: Vec3;
+  /** Centre of the cuboid in world space. */
+  translation: Vec3;
+  /** Friction coefficient. Defaults to `DEFAULT_FRICTION`. */
+  friction?: number;
+}
+
 export interface TerrainColliderOptions {
   readonly vertices: Float32Array;
   readonly indices: Uint32Array;
@@ -363,6 +373,63 @@ export class PhysicsWorld {
       RAPIER.RigidBodyDesc.fixed().setTranslation(0, -thick / 2, 0),
     );
     const collider = this.world.createCollider(RAPIER.ColliderDesc.cuboid(half, thick / 2, half), body);
+    collider.setFriction(friction);
+    this.liveColliders.add(collider);
+    return body;
+  }
+
+  /**
+   * Create a fixed cuboid at an arbitrary place, and track it.
+   *
+   * The world's boundary walls are four of these. They go through this rather
+   * than straight through `world.createCollider` for the same reason everything
+   * else does: `removeCollider` turns away any handle it did not create, so an
+   * untracked collider is not merely unremovable, it is invisible to
+   * `liveColliders` and its body keeps its slot in the broad phase forever.
+   * A wall that "works" until somebody counts the bodies is the exact failure
+   * `removeCollider`'s comment warns about.
+   *
+   * A cuboid and not a capsule or a trimesh: the wall is a flat plane with
+   * thickness, the broad phase gets an AABB out of it for free, and there is no
+   * facet for a fast player to catch on.
+   */
+  createBoxCollider(options: BoxColliderOptions): RAPIER.RigidBody {
+    if (this.freed) {
+      throw new Error('[PhysicsWorld] createBoxCollider called after dispose()');
+    }
+    const { halfExtents, translation, friction = DEFAULT_FRICTION } = options;
+    for (const [label, value] of [
+      ['halfExtents.x', halfExtents.x],
+      ['halfExtents.y', halfExtents.y],
+      ['halfExtents.z', halfExtents.z],
+      ['translation.x', translation.x],
+      ['translation.y', translation.y],
+      ['translation.z', translation.z],
+    ] as const) {
+      if (!Number.isFinite(value)) {
+        throw new RangeError(
+          `[PhysicsWorld] box collider ${label} must be finite, received ${String(value)}`,
+        );
+      }
+    }
+    if (halfExtents.x <= 0 || halfExtents.y <= 0 || halfExtents.z <= 0) {
+      throw new RangeError(
+        `[PhysicsWorld] box collider half-extents must be positive, received ` +
+          `${halfExtents.x}, ${halfExtents.y}, ${halfExtents.z}`,
+      );
+    }
+
+    const body = this.world.createRigidBody(
+      RAPIER.RigidBodyDesc.fixed().setTranslation(
+        translation.x,
+        translation.y,
+        translation.z,
+      ),
+    );
+    const collider = this.world.createCollider(
+      RAPIER.ColliderDesc.cuboid(halfExtents.x, halfExtents.y, halfExtents.z),
+      body,
+    );
     collider.setFriction(friction);
     this.liveColliders.add(collider);
     return body;

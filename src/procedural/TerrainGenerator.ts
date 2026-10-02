@@ -41,7 +41,14 @@
  * =============================================================================
  */
 
-import { BufferAttribute, BufferGeometry, Float32BufferAttribute, Matrix4, PlaneGeometry } from 'three';
+import {
+  BufferAttribute,
+  BufferGeometry,
+  Float32BufferAttribute,
+  InterleavedBufferAttribute,
+  Matrix4,
+  PlaneGeometry,
+} from 'three';
 import { PerlinNoise2D, SimplexNoise2D, fbm2D, ridged2D, voronoiF1Normalized } from './NoiseLibrary';
 import { StreamSpline } from './StreamSpline';
 import { BANK_MARGIN, BANK_PLATEAU, BANK_RISE, StreamProfile } from './StreamGenerator';
@@ -62,6 +69,19 @@ export const TERRAIN_SIZE = 500;
  * spend the entire budget on the ground before a single tree exists.
  */
 export const TERRAIN_RESOLUTION = 384;
+
+/**
+ * Tiles per side the ground is split into for frustum culling.
+ *
+ * 8 gives 64 tiles of 48x48 cells - 62.5 m and 4,512 triangles each. Measured
+ * at the default camera pitch over the whole stream, that submits 32 tiles
+ * where the single mesh submitted all 64: 141,376 triangles against 293,378, a
+ * 52% saving, for 31 extra draw calls. Finer than this buys triangles with
+ * draw calls (16 tiles/side saves another 31,000 triangles for 214 more calls
+ * and would blow the draw-call budget on its own); coarser leaves most of the
+ * saving on the table.
+ */
+export const TERRAIN_TILES_PER_SIDE = 8;
 
 /** Octaves of fbm for the base hills. The plan asks for 4-6. */
 export const DEFAULT_OCTAVES = 5;
@@ -1099,6 +1119,160 @@ export function buildTerrainGeometry(data: TerrainData): BufferGeometry {
   geometry.computeVertexNormals();
   geometry.computeBoundingSphere();
 
+  return geometry;
+}
+
+/**
+ * What `BufferGeometry.getAttribute` hands back.
+ *
+ * The union is a typing detail rather than a case to handle: both members
+ * expose `array` and `itemSize`, which is all the slicing in `buildTerrainTiles`
+ * needs, and nothing in this codebase builds an interleaved attribute.
+ */
+type AnyAttribute = BufferAttribute | InterleavedBufferAttribute;
+
+/**
+ * Slice a whole-terrain geometry into independent, frustum-cullable tiles.
+ *
+ * Why tiles
+ * ---------
+ * The plan's performance budget asks for "Three.js default frustum culling",
+ * and one mesh spanning the entire 500 m terrain gets almost nothing from it.
+ * Three culls per mesh, against that mesh's bounding sphere: the terrain's
+ * sphere is centred on the world and reaches every corner, so it intersects
+ * the frustum whenever the camera is anywhere near the middle of the map, and
+ * the whole 293,378-triangle grid is submitted every frame no matter which way
+ * the player looks.
+ *
+ * Split into 64 tiles of 48x48 cells and the same camera submits 32 of them -
+ * 141,376 triangles, a 52% saving - because the tiles behind and beside the
+ * player are culled as whole objects. Measured at the default camera pitch
+ * along the whole stream; see `tests/frame-budget.test.ts`.
+ *
+ * Why the normals are copied rather than recomputed
+ * ------------------------------------------------
+ * `computeVertexNormals()` on a tile only sees the triangles inside that tile,
+ * so a vertex on a tile boundary loses the quads that belong to its neighbour
+ * and comes out with a slightly different normal than it had on the whole grid.
+ * That is a shading seam along every tile edge - eight of them each way, which
+ * at 62.5 m spacing is a visible grid drawn across the hillside. Copying the
+ * master's `normal` attribute into each slice keeps every vertex exactly as it
+ * was, so the tiles are indistinguishable from the single mesh they replaced.
+ *
+ * Tiles are square in cells, so `resolution` must divide evenly. A resolution
+ * that does not divide falls back to fewer, larger tiles rather than throwing:
+ * the terrain is not allowed to fail to build because of a culling preference.
+ */
+export function buildTerrainTiles(geometry: BufferGeometry, tilesPerSide: number): BufferGeometry[] {
+  const side = Math.max(1, Math.floor(tilesPerSide));
+  const position = geometry.getAttribute('position');
+  const normal = geometry.getAttribute('normal');
+  if (!position || !normal) {
+    throw new Error('[TerrainGenerator] terrain geometry has no position or normal attribute');
+  }
+
+  // The grid is square in vertices. Infer the side length from the vertex
+  // count rather than taking it as an argument, so the tiles cannot disagree
+  // with the geometry they came from.
+  const resolution = Math.round(Math.sqrt(position.count));
+  if (resolution * resolution !== position.count) {
+    throw new Error(
+      `[TerrainGenerator] terrain has ${position.count} vertices, which is not a square grid`,
+    );
+  }
+  const cells = resolution - 1;
+
+  const sources: [AnyAttribute | undefined, number, string][] = [
+    [position, 3, 'position'],
+    [normal, 3, 'normal'],
+    [geometry.getAttribute('color'), 3, 'color'],
+    [geometry.getAttribute('biome'), 4, 'biome'],
+    [geometry.getAttribute('corruption'), 1, 'corruption'],
+  ];
+
+  // Cells per tile, spread so the remainder lands on the leading tiles rather
+  // than making the last one the only short one. 383 cells over 8 tiles is
+  // 48,48,48,48,48,48,48,47 - the tiles are not identical in size, and that
+  // costs nothing: each is still culled as one object.
+  const base = Math.floor(cells / side);
+  const extra = cells % side;
+  const spans: number[] = [];
+  for (let i = 0; i < side; i++) spans.push(base + (i < extra ? 1 : 0));
+
+  const tiles: BufferGeometry[] = [];
+  let rowStart = 0;
+  for (let tz = 0; tz < side; tz++) {
+    let colStart = 0;
+    for (let tx = 0; tx < side; tx++) {
+      tiles.push(sliceTile(sources, resolution, colStart, rowStart, spans[tx], spans[tz]));
+      colStart += spans[tx];
+    }
+    rowStart += spans[tz];
+  }
+  return tiles;
+}
+
+/**
+ * One rectangular window of the grid, as its own geometry with its own bounds.
+ *
+ * The window is given in cells: `cols` by `rows` of them starting at
+ * (`x0`, `z0`). It carries one extra row and column of vertices beyond that,
+ * because a cell at column `cols - 1` needs the vertex at column `cols` to
+ * close its quad, and that vertex belongs to the next tile. Without the
+ * overlap every tile would silently drop its far row and column of ground -
+ * 10,626 triangles, or one cell in sixteen, gone from the world.
+ *
+ * The index is written in `PlaneGeometry`'s own order - `(a, b, d)` and
+ * `(b, e, d)` over the corners `a=(i,j) b=(i,j+1) e=(i+1,j+1) d=(i+1,j)` - so
+ * the tiles face the same way the master did and the baked rotation keeps
+ * working untouched.
+ */
+function sliceTile(
+  sources: [AnyAttribute | undefined, number, string][],
+  resolution: number,
+  x0: number,
+  z0: number,
+  cols: number,
+  rows: number,
+): BufferGeometry {
+  const width = cols + 1;
+  const height = rows + 1;
+  const count = width * height;
+  const geometry = new BufferGeometry();
+
+  for (const [source, itemSize, name] of sources) {
+    if (!source) continue;
+    const out = new Float32Array(count * itemSize);
+    for (let r = 0; r < height; r++) {
+      const from = ((z0 + r) * resolution + x0) * itemSize;
+      const span = width * itemSize;
+      // `set` converts element-wise, so this is correct whatever the master's
+      // own array type was.
+      out.set(source.array.subarray(from, from + span), r * span);
+    }
+    geometry.setAttribute(name, new BufferAttribute(out, itemSize));
+  }
+
+  const indices = count > 65535 ? new Uint32Array(cols * rows * 6) : new Uint16Array(cols * rows * 6);
+  let k = 0;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const a = r * width + c;
+      const b = a + width;
+      const d = a + 1;
+      const e = b + 1;
+      indices[k++] = a;
+      indices[k++] = b;
+      indices[k++] = d;
+      indices[k++] = b;
+      indices[k++] = e;
+      indices[k++] = d;
+    }
+  }
+  geometry.setIndex(new BufferAttribute(indices, 1));
+
+  geometry.computeBoundingSphere();
+  geometry.computeBoundingBox();
   return geometry;
 }
 

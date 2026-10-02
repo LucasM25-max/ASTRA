@@ -34,12 +34,14 @@ describe('WorldScene', () => {
   it('populates the scene with terrain, sky, lights and the player', async () => {
     const { scene, world } = await buildScene();
 
-    expect(scene.children).toContain(world.terrain.mesh);
+    // The terrain attaches its tile group, not the master grid: the tiles are
+    // what Three culls, and adding the master too would draw the ground twice.
+    expect(scene.children).toContain(world.terrain.group);
     expect(scene.children).toContain(world.sky.mesh);
     expect(scene.children).toContain(world.lighting.group);
     expect(scene.children).toContain(world.player.mesh);
 
-    expect(scene.getObjectByName('terrain')).toBe(world.terrain.mesh);
+    expect(scene.getObjectByName('terrain')).toBe(world.terrain.group);
     expect(scene.getObjectByName('sky')).toBe(world.sky.mesh);
     expect(scene.getObjectByName('sun')).toBe(world.lighting.sun);
     expect(scene.getObjectByName('ambient')).toBe(world.lighting.ambient);
@@ -222,12 +224,23 @@ describe('WorldScene', () => {
   it('gives the world a static terrain collider built from the mesh', async () => {
     const { world } = await buildScene();
 
-    // The fixed terrain, the dynamic player, and one fixed body per nearby
-    // trunk. Step 2.3 gives trees colliders so the player cannot walk through
-    // them, and a capsule has to sit on a body of its own.
+    // The fixed terrain, the dynamic player, one fixed body per nearby trunk,
+    // the four boundary walls, and one fixed body per rock that currently has
+    // a collider. Step 2.3 gives trees colliders so the player cannot walk
+    // through them, and Step 2.9 adds the walls and the rocks. A capsule has to
+    // sit on a body of its own, which is why every collider costs a body.
     const trunkBodies = world.forest.colliderCount;
+    const rockBodies = world.boundary.colliderCount;
     expect(trunkBodies).toBeGreaterThan(0);
-    expect(world.physics.world.bodies.len()).toBe(2 + trunkBodies);
+    expect(world.boundary.wallCount).toBe(4);
+    // The walls and the rocks are inside the collider radius of wherever the
+    // player spawns, so some rocks have colliders by now - but not all of them,
+    // or the radius gating would not be doing anything.
+    expect(rockBodies).toBeGreaterThan(0);
+    expect(rockBodies).toBeLessThan(world.boundary.rocks.length);
+    expect(world.physics.world.bodies.len()).toBe(
+      2 + world.boundary.wallCount + trunkBodies + rockBodies,
+    );
 
     const fixed: number[] = [];
     const dynamic: number[] = [];
@@ -235,7 +248,7 @@ describe('WorldScene', () => {
       (body.isFixed() ? fixed : dynamic).push(body.translation().y);
     });
     expect(dynamic).toHaveLength(1);
-    expect(fixed).toHaveLength(1 + trunkBodies);
+    expect(fixed).toHaveLength(1 + world.boundary.wallCount + trunkBodies + rockBodies);
 
     // The terrain body carries no offset, because the mesh's vertex buffer is
     // already in world coordinates - offsetting it here would shift the

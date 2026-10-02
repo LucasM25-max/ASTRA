@@ -37,6 +37,7 @@
 import { DataTexture, Fog, type Scene } from 'three';
 import { LightingSystem } from '../renderer/LightingSystem';
 import { buildAtmosphereMask } from '../renderer/PostProcessing';
+import { BoundarySystem } from './BoundarySystem';
 import { Forest, type ForestOptions } from './Forest';
 import {
   CorruptionSystem,
@@ -188,6 +189,21 @@ export interface WorldSceneOptions {
     foliageRadius?: number;
   };
   /**
+   * Boundary parameters: the invisible walls and the large rocks.
+   *
+   * The walls need nothing from the caller and cannot be turned off - a world
+   * the player can walk out of is a bug, not a configuration. What is worth
+   * passing is a rock count and a collider radius for a cheap test world.
+   */
+  boundary?: {
+    /** Total large rocks. Defaults to `DEFAULT_ROCK_COUNT`. */
+    rockCount?: number;
+    /** How far from the camera rocks keep a collider, in metres. */
+    colliderRadius?: number;
+    /** World seed. Defaults to the terrain's. */
+    seed?: number;
+  };
+  /**
    * Corruption parameters. Defaults to the standard rot along the stream.
    *
    * The corruption system needs the terrain's height sampler and the stream's
@@ -219,6 +235,14 @@ export class WorldScene {
   readonly terrain: Terrain;
   readonly stream: Stream;
   readonly forest: Forest;
+
+  /**
+   * The world's edge: four invisible walls, and the field of large rocks that
+   * stands against them. The tree belt the plan asks for is a rim term in the
+   * forest's own density field, so it is the forest's work and not this
+   * system's - see `BoundarySystem`'s header.
+   */
+  readonly boundary: BoundarySystem;
   readonly corruption: CorruptionSystem;
   readonly sky: SkySystem;
   readonly lighting: LightingSystem;
@@ -314,6 +338,14 @@ export class WorldScene {
       foliageRadius: options.forest?.foliageRadius,
     });
 
+    // The boundary comes after the forest, because the tree belt it leans on
+    // is a rim term in the forest's own density field: the forest has to be
+    // placed before anything can rely on that belt being there.
+    this.boundary = new BoundarySystem(this.terrain, this.physics, {
+      ...options.boundary,
+      seed: options.boundary?.seed ?? options.terrain?.seed,
+    });
+
     // The corruption is built last of the three that grow out of the terrain,
     // because it needs the terrain's samplers and the stream's path and adds
     // nothing either of them depends on.
@@ -363,6 +395,7 @@ export class WorldScene {
     this.stream.addTo(this.scene);
     this.forest.addTo(this.scene);
     this.corruption.addTo(this.scene);
+    this.boundary.addTo(this.scene);
     this.sky.addTo(this.scene);
     this.lighting.addTo(this.scene);
     this.player.addTo(this.scene);
@@ -440,6 +473,11 @@ export class WorldScene {
     this.lighting.update(delta);
     this.stream.update(delta, focus);
     this.forest.update(delta, focus);
+    // The boundary's colliders follow the camera the way the forest's trunks
+    // do. It is gated internally on the camera having moved half the collider
+    // radius, so this costs a distance check on the frames where nothing
+    // changes.
+    this.boundary.update(focus.x, focus.z);
     this.corruption.update(delta, focus);
     // Reconcile the character with its body and advance its clips. The delta is
     // the same scaled game time everything else here runs on, so the character
@@ -553,6 +591,7 @@ export class WorldScene {
     this.terrain.removeFrom(this.scene);
     this.stream.removeFrom(this.scene);
     this.forest.removeFrom(this.scene);
+    this.boundary.removeFrom(this.scene);
     this.corruption.removeFrom(this.scene);
     this.sky.removeFrom(this.scene);
     this.lighting.removeFrom(this.scene);
@@ -563,6 +602,7 @@ export class WorldScene {
     this.terrain.dispose();
     this.stream.dispose();
     this.forest.dispose();
+    this.boundary.dispose();
     this.corruption.dispose();
     this.sky.dispose();
     this.lighting.dispose();

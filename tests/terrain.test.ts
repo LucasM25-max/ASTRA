@@ -264,14 +264,18 @@ describe('Terrain', () => {
   });
 
   describe('collision data', () => {
-    it('hands back the mesh own buffers, in world coordinates', () => {
+    it('hands back the surface the tiles are drawn from, in world coordinates', () => {
       const terrain = small({ size: 100 });
       const { vertices, indices } = terrain.collisionData();
       const position = terrain.mesh.geometry.getAttribute('position');
 
-      // The same buffer object, not a copy: that is the whole point.
-      expect(vertices).toBe(position.array);
+      // Not the same buffer object: the master grid is disposed once the tiles
+      // have been sliced from it, so the collider owns a copy that cannot be
+      // invalidated by anything that happens to the geometry afterwards. What
+      // matters is that the numbers are the surface the player sees, which the
+      // tile test checks vertex for vertex.
       expect(vertices.length).toBe(position.count * 3);
+      expect(indices.length).toBe(terrain.mesh.geometry.getIndex()!.count);
 
       // Every index must be in range, or Rapier rejects the whole collider.
       const vertexCount = position.count;
@@ -301,11 +305,54 @@ describe('Terrain', () => {
       const terrain = small();
 
       terrain.addTo(scene);
-      expect(scene.children).toContain(terrain.mesh);
-      expect(scene.getObjectByName('terrain')).toBe(terrain.mesh);
+      // The tiles are what is drawn, so they are what is attached. The master
+      // grid is deliberately NOT in the scene: it would draw the whole terrain
+      // a second time and undo the culling the tiles exist for.
+      expect(scene.children).toContain(terrain.group);
+      expect(scene.getObjectByName('terrain')).toBe(terrain.group);
+      expect(scene.getObjectByName('terrain')).not.toBe(terrain.mesh);
+      expect(terrain.group.children.length).toBe(terrain.tiles.length);
+      for (const tile of terrain.tiles) expect(terrain.group.children).toContain(tile);
 
       terrain.removeFrom(scene);
-      expect(scene.children).not.toContain(terrain.mesh);
+      expect(scene.children).not.toContain(terrain.group);
+      expect(scene.getObjectByName('terrain')).toBeUndefined();
+    });
+
+    it('draws every tile from one shared material, so the look is written once', () => {
+      const terrain = small();
+      const materials = new Set(terrain.tiles.map((t) => t.material));
+      expect(materials.size).toBe(1);
+      expect(terrain.tiles[0].material).toBe(terrain.mesh.material);
+    });
+
+    it('leaves every tile cullable and static', () => {
+      const terrain = small();
+      for (const tile of terrain.tiles) {
+        // Default culling is the whole point of the split, and a tile that
+        // opted out would draw the whole world again.
+        expect(tile.frustumCulled).toBe(true);
+        // The tiles never move, so their matrices are uploaded once.
+        expect(tile.matrixAutoUpdate).toBe(false);
+        expect(tile.receiveShadow).toBe(true);
+        expect(tile.position.toArray()).toEqual([0, 0, 0]);
+      }
+    });
+
+    it('disposes every tile geometry exactly once', () => {
+      const terrain = small();
+      const disposed: unknown[] = [];
+      for (const tile of terrain.tiles) {
+        const original = tile.geometry.dispose.bind(tile.geometry);
+        tile.geometry.dispose = () => {
+          disposed.push(tile.geometry);
+          original();
+        };
+      }
+      const before = terrain.tiles.length;
+      terrain.dispose();
+      expect(disposed.length).toBe(before);
+      expect(terrain.group.children.length).toBe(0);
     });
 
     it('keeps the mesh localToWorld contract for camera work', () => {
