@@ -51,6 +51,13 @@ import { Stream } from './Stream';
 import type { SplinePoint, StreamSpline } from '../procedural/StreamSpline';
 import type { WaterMaterialOptions as StreamWaterOptions } from '../procedural/WaterShader';
 import type { WaterAudioOptions as StreamAudioOptions } from '../audio/WaterAudio';
+import {
+  AmbientSystem,
+  resolveSurface,
+  type AmbientAudioFrame,
+  type AmbientSystemOptions,
+} from '../audio/AmbientSystem';
+import type { FootstepSurface } from '../audio/SoundForge';
 
 /**
  * Fog distances tuned for a 500m terrain viewed from ~8m out.
@@ -151,6 +158,15 @@ export interface WorldSceneOptions {
     audio?: StreamAudioOptions;
   };
   /**
+   * Ambient audio parameters. Omit to run silent, which is what the tests do -
+   * there is no `AudioContext` in Node.
+   *
+   * The stream's own sound is separate and lives under `stream.audio`; this
+   * system takes a reference to it so one mute switch silences everything, and
+   * does not create a second recording of the same river.
+   */
+  audio?: AmbientSystemOptions;
+  /**
    * Forest generation parameters.
    *
    * The forest needs the terrain's height and normal samplers and the stream's
@@ -217,6 +233,16 @@ export class WorldScene {
   readonly dayNight: DayNightCycle;
   readonly player: Player;
   readonly physics: PhysicsWorld;
+  /**
+   * The forest's sound: wind, leaves, birds, distant animals, the corruption's
+   * hum, and the player's own footsteps.
+   *
+   * Built last, because it reads from the stream, the forest, the terrain and
+   * the character - everything that had to exist first. It is a no-op in a
+   * headless environment, so a world can be built and stepped in tests with the
+   * audio present.
+   */
+  readonly ambient: AmbientSystem;
 
   private readonly scene: Scene;
 
@@ -325,6 +351,14 @@ export class WorldScene {
       depth: 0.22,
     });
 
+    this.ambient = new AmbientSystem({
+      ...options.audio,
+      seed: options.audio?.seed ?? options.terrain?.seed,
+      // The stream's own water loop, so one mute silences both. Not a second
+      // water sound: two loops of the same river are audibly two loops.
+      water: this.stream.sound,
+    });
+
     this.terrain.addTo(this.scene);
     this.stream.addTo(this.scene);
     this.forest.addTo(this.scene);
@@ -388,7 +422,7 @@ export class WorldScene {
    * move the camera independently - and is what keeps this callable with one
    * argument, as it always has been.
    */
-  update(delta: number, listener?: SplinePoint): void {
+  update(delta: number, listener?: SplinePoint, forward?: SplinePoint): void {
     if (this.disposed) return;
     if (!Number.isFinite(delta) || delta < 0) return;
 
@@ -411,7 +445,78 @@ export class WorldScene {
     // the same scaled game time everything else here runs on, so the character
     // slows and freezes with the world during time dilation rather than
     // striding on through a frozen scene.
+    //
+    // This runs before the audio on purpose: `syncMesh` is what advances the
+    // animator, and the animator's stride phase is what times the footsteps. An
+    // audio update that ran first would fire a footstep a frame late, every
+    // frame, for the whole game.
     this.player.syncMesh(delta);
+
+    this.ambient.update(delta, this.audioFrame(focus, forward));
+  }
+
+  /**
+   * Everything the ambient audio needs to know about this frame.
+   *
+   * Gathered here rather than passed in, because every one of these numbers is a
+   * world property the world already owns - and a caller that had to assemble
+   * them would be a caller that could assemble them differently.
+   *
+   * `focus` is where the ears are, which is the camera rather than the player:
+   * the same position the light rig and the stream's sound are driven from, so
+   * everything in the world agrees about where the viewer is standing.
+   */
+  private audioFrame(
+    focus: { x: number; y: number; z: number },
+    forward?: { x: number; y: number; z: number },
+  ): AmbientAudioFrame {
+    const player = this.player.position;
+    const feet = player.y - this.player.height * 0.5;
+
+    // Water underfoot, not merely nearby. `submersionAt` is the depth the stream
+    // itself reports at these coordinates, so the splash is tied to the same
+    // water surface the player is standing in rather than to a distance guess.
+    const waterDepth = this.stream.submersionAt(player.x, player.z, feet);
+    const surface: FootstepSurface | null = resolveSurface(this.terrain.biomeAt(player.x, player.z), waterDepth);
+
+    // The forward direction is flattened onto the ground plane before it is
+    // used: a camera looking down at the player from above would otherwise pan
+    // every bird call to one side, because its forward vector would be mostly
+    // vertical and the XZ part would be nearly zero.
+    let fx = forward?.x ?? 0;
+    let fz = forward?.z ?? 1;
+    const flen = Math.hypot(fx, fz);
+    if (flen < 1e-6) {
+      fx = 0;
+      fz = 1;
+    } else {
+      fx /= flen;
+      fz /= flen;
+    }
+
+    // `forestDensityAt` is a *placement* density - trees per unit area - and it
+    // deliberately goes above one near the stream, where the forest is thickest.
+    // The audio wants a fraction, and `ambientMix` clamps whatever it is given,
+    // so the boundary where the two disagree is here rather than a surprise
+    // discovered by reading the mix. Measured on the default world: 0 on bare
+    // rim ground up to 1.97 on the stream bank.
+    const canopy = Math.min(1, Math.max(0, this.forest.canopyAt(focus.x, focus.z)));
+
+    return {
+      x: focus.x,
+      y: focus.y,
+      z: focus.z,
+      forwardX: fx,
+      forwardZ: fz,
+      corruption: this.terrain.corruptionAt(focus.x, focus.z),
+      // The forest's own gust, read straight off the uniform object the trees
+      // sway by. Not a second model of the wind.
+      gust: this.forest.windGustUniform.value,
+      canopy,
+      surface,
+      stridePhase: this.player.animator.stridePhase,
+      footfallInterval: this.player.animator.footfallInterval,
+    };
   }
 
   /**
@@ -462,5 +567,6 @@ export class WorldScene {
     this.sky.dispose();
     this.lighting.dispose();
     this.player.dispose();
+    this.ambient.dispose();
   }
 }

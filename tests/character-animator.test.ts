@@ -34,6 +34,7 @@ import {
   IDLE_SPEED,
   MAX_TIME_SCALE,
   MIN_TIME_SCALE,
+  RUN_CYCLE,
   RUN_SPEED,
   WALK_CYCLE,
   WALK_SPEED,
@@ -612,5 +613,151 @@ describe('lifecycle', () => {
     const { rig, animator } = rig_and_animator();
     animator.dispose();
     expect(() => rig.root.updateMatrixWorld(true)).not.toThrow();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Stride cadence                                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The audio's footstep timing comes from here.
+ *
+ * A footstep that does not land when the foot lands is worse than no footstep:
+ * the sound detaches from the movement and the character reads as a puppet with
+ * a sound effect attached. So the cadence is read off the mixer's own action
+ * time rather than from a second timer, and these tests check that what it
+ * reports is what the clips actually do.
+ */
+describe('stride cadence', () => {
+  it('reports no stride at all when standing still', () => {
+    const { animator } = rig_and_animator();
+    expect(animator.state).toBe('idle');
+    expect(animator.stridePhase).toBe(0);
+    expect(animator.footfallInterval).toBe(0);
+    animator.dispose();
+  });
+
+  it('matches the walk clip at the walk reference speed', () => {
+    const { animator } = rig_and_animator();
+    animator.setSpeed(WALK_SPEED);
+
+    // The action's time scale is speed / reference speed, so a cycle takes
+    // WALK_CYCLE / timeScale seconds and there are two footfalls per cycle.
+    const timeScale = WALK_SPEED / animator.walkReference.speed;
+    expect(animator.footfallInterval).toBeCloseTo(WALK_CYCLE / timeScale / 2, 6);
+
+    // Measured: 0.3604 s between footfalls at 3.5 m/s, which is 2.8 steps a
+    // second - a walk, not a shuffle and not a march.
+    expect(animator.footfallInterval).toBeGreaterThan(0.3);
+    expect(animator.footfallInterval).toBeLessThan(0.45);
+    animator.dispose();
+  });
+
+  it('matches the run clip at the run reference speed', () => {
+    const { animator } = rig_and_animator();
+    animator.setSpeed(RUN_SPEED);
+
+    const timeScale = RUN_SPEED / animator.runReference.speed;
+    expect(animator.footfallInterval).toBeCloseTo(RUN_CYCLE / timeScale / 2, 6);
+
+    // Measured: 0.2299 s, which is 4.3 steps a second.
+    expect(animator.footfallInterval).toBeGreaterThan(0.18);
+    expect(animator.footfallInterval).toBeLessThan(0.28);
+    animator.dispose();
+  });
+
+  it('steps faster when running than when walking', () => {
+    const { animator } = rig_and_animator();
+    animator.setSpeed(WALK_SPEED);
+    const walk = animator.footfallInterval;
+    animator.setSpeed(RUN_SPEED);
+    const run = animator.footfallInterval;
+
+    expect(run).toBeLessThan(walk);
+    // Measured ratio 1.57. A run that only steps 10% faster than a walk is a
+    // walk with the arms wrong.
+    expect(walk / run).toBeGreaterThan(1.3);
+    animator.dispose();
+  });
+
+  it('advances the phase monotonically and wraps through zero', () => {
+    const { animator } = rig_and_animator();
+    animator.setSpeed(WALK_SPEED);
+
+    let previous = animator.stridePhase;
+    let wrapped = false;
+    let sawHigh = false;
+    for (let i = 0; i < 200; i++) {
+      animator.update(1 / 60);
+      const phase = animator.stridePhase;
+      expect(phase).toBeGreaterThanOrEqual(0);
+      expect(phase).toBeLessThanOrEqual(1);
+      if (phase < previous - 0.5) wrapped = true;
+      if (previous > 0.9) sawHigh = true;
+      previous = phase;
+    }
+    // It got near the end of the cycle, and it came back round.
+    expect(sawHigh).toBe(true);
+    expect(wrapped).toBe(true);
+    animator.dispose();
+  });
+
+  it('lands as many footfalls as its own interval predicts', () => {
+    // The integration check. Everything above is arithmetic on the interval;
+    // this is the interval held against the thing it is supposed to describe.
+    const { animator } = rig_and_animator();
+    animator.setSpeed(WALK_SPEED);
+
+    const seconds = 6;
+    const step = 1 / 60;
+    let footfalls = 0;
+    let last = -1;
+    for (let i = 0; i < Math.round(seconds / step); i++) {
+      animator.update(step);
+      const index = Math.floor(animator.stridePhase * 2 + 1e-6) % 2;
+      if (index !== last) {
+        if (last !== -1) footfalls++;
+        last = index;
+      }
+    }
+
+    const predicted = seconds / animator.footfallInterval;
+    expect(footfalls).toBeGreaterThan(predicted * 0.9);
+    expect(footfalls).toBeLessThan(predicted * 1.1);
+    animator.dispose();
+  });
+
+  it('reports nothing while jumping', () => {
+    const { animator } = rig_and_animator();
+    animator.setSpeed(RUN_SPEED);
+    animator.jump();
+
+    expect(animator.isJumping).toBe(true);
+    expect(animator.stridePhase).toBe(0);
+    expect(animator.footfallInterval).toBe(0);
+
+    animator.update(1 / 60);
+    expect(animator.stridePhase).toBe(0);
+    expect(animator.footfallInterval).toBe(0);
+    animator.dispose();
+  });
+
+  it('stops shrinking the interval below the time-scale clamp', () => {
+    // Below MIN_TIME_SCALE the clip stops slowing down before the body does, and
+    // the audio follows the animation rather than the ground speed - what the
+    // player should hear is what the player can see. Measured: the interval
+    // bottoms out at 1.0286 s for every speed under about 1.2 m/s.
+    const { animator } = rig_and_animator();
+    animator.setSpeed(0.2);
+    const slow = animator.footfallInterval;
+    animator.setSpeed(1.0);
+    const alsoSlow = animator.footfallInterval;
+    animator.setSpeed(1.75);
+    const faster = animator.footfallInterval;
+
+    expect(alsoSlow).toBeCloseTo(slow, 6);
+    expect(faster).toBeLessThan(slow);
+    animator.dispose();
   });
 });

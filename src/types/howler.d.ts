@@ -17,6 +17,14 @@ declare module 'howler' {
     html5?: boolean;
     preload?: boolean;
     autoplay?: boolean;
+    /**
+     * Named regions of the buffer, in milliseconds from the start.
+     *
+     * `play(name)` then plays just that region. This is how several variants of
+     * one sound share a single decoded buffer: they are packed end to end with a
+     * gap, and each gets a sprite.
+     */
+    sprite?: Record<string, [number, number]>;
     /** Called once the sound can be played. */
     onload?: () => void;
     onloaderror?: (id: number, error: unknown) => void;
@@ -25,10 +33,11 @@ declare module 'howler' {
 
   export class Howl {
     constructor(properties: IHowlProperties);
-    play(): number;
+    /** Play the whole buffer, or just the named sprite. */
+    play(sprite?: string): number;
     pause(): this;
     stop(): this;
-    volume(volume: number, id?: number): this | number;
+    volume(volume?: number, id?: number): this | number;
     loop(loop?: boolean): this | boolean;
     playing(id?: number): boolean;
     state(): 'unloaded' | 'loading' | 'loaded';

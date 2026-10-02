@@ -333,4 +333,105 @@ describe('Terrain', () => {
       expect(disposeMaterial).toHaveBeenCalledTimes(1);
     });
   });
+
+  /**
+   * The two samplers Step 2.8's audio needs.
+   *
+   * Both read fields the terrain already bakes, and that is the whole point: a
+   * footstep that decides what it landed on from anything other than the weights
+   * the terrain shader blends with is a footstep that can disagree with the
+   * ground the player can see. So these tests check the samplers agree with the
+   * arrays rather than merely returning something plausible.
+   */
+  describe('surface samplers', () => {
+    it('returns biome weights that are normalised and in range everywhere', () => {
+      const terrain = small({ size: 200 });
+      const distinct = new Set<string>();
+
+      for (let x = -95; x <= 95; x += 5) {
+        for (let z = -95; z <= 95; z += 5) {
+          const b = terrain.biomeAt(x, z);
+          const sum = b.grass + b.dirt + b.rock + b.mud;
+          expect(Math.abs(sum - 1), `sum at ${x},${z}`).toBeLessThan(1e-4);
+          for (const [name, value] of Object.entries(b)) {
+            expect(value, `${name} at ${x},${z}`).toBeGreaterThanOrEqual(-1e-6);
+            expect(value, `${name} at ${x},${z}`).toBeLessThanOrEqual(1 + 1e-6);
+          }
+          distinct.add(`${b.grass.toFixed(2)},${b.dirt.toFixed(2)},${b.rock.toFixed(2)},${b.mud.toFixed(2)}`);
+        }
+      }
+
+      // Measured on the default terrain: 185 distinct weight vectors over a
+      // 34x34 sample grid. Four smooth rules with no noise factor produce four
+      // smooth bands and a handful of distinct vectors; the Voronoi and simplex
+      // perturbation is what breaks them up, and this is where that shows.
+      expect(distinct.size).toBeGreaterThan(50);
+    });
+
+    it('reproduces the baked array exactly at a grid vertex', () => {
+      // The strongest available check that the sampler reads the same lattice
+      // the generator wrote. At a vertex the bilinear weights are 0 and 1, so
+      // an interpolation that had drifted - a transposed index, a stride off by
+      // one - would show up here as a mismatch rather than as a small error.
+      const terrain = small({ size: 200, resolution: 48 });
+      const half = 100;
+      const step = 200 / 47;
+      const resolution = 48;
+
+      const snap = (v: number): number => -half + Math.round((v + half) / step) * step;
+      const vx = snap(37);
+      const vz = snap(-12);
+
+      const sampled = terrain.biomeAt(vx, vz);
+      const i = Math.round((vz + half) / step);
+      const j = Math.round((vx + half) / step);
+      const o = (i * resolution + j) * 4;
+
+      expect(sampled.grass).toBeCloseTo(terrain.data.biomeWeights[o], 6);
+      expect(sampled.dirt).toBeCloseTo(terrain.data.biomeWeights[o + 1], 6);
+      expect(sampled.rock).toBeCloseTo(terrain.data.biomeWeights[o + 2], 6);
+      expect(sampled.mud).toBeCloseTo(terrain.data.biomeWeights[o + 3], 6);
+    });
+
+    it('samples corruption in the same range the field is defined over', () => {
+      const terrain = small({ size: 200 });
+
+      let min = Infinity;
+      let max = -Infinity;
+      for (let x = -95; x <= 95; x += 5) {
+        for (let z = -95; z <= 95; z += 5) {
+          const c = terrain.corruptionAt(x, z);
+          expect(Number.isFinite(c)).toBe(true);
+          min = Math.min(min, c);
+          max = Math.max(max, c);
+        }
+      }
+
+      // 0 to 1 by construction, and both ends actually reached on the small
+      // terrain - a sampler that returned a constant would pass a range check
+      // and fail this one.
+      expect(min).toBeGreaterThanOrEqual(0);
+      expect(max).toBeLessThanOrEqual(1);
+      expect(max - min).toBeGreaterThan(0.2);
+    });
+
+    it('clamps outside the terrain instead of throwing', () => {
+      // The player can walk off the edge, and a sampler that threw on the way
+      // out would take the audio - and anything else that asked - with it.
+      const terrain = small({ size: 200 });
+      for (const [x, z] of [[9999, -9999], [-9999, 9999], [0, 5000]]) {
+        const b = terrain.biomeAt(x, z);
+        expect(Math.abs(b.grass + b.dirt + b.rock + b.mud - 1)).toBeLessThan(1e-4);
+        expect(terrain.corruptionAt(x, z)).toBeGreaterThanOrEqual(0);
+      }
+    });
+
+    it('is deterministic', () => {
+      const terrain = small({ size: 200 });
+      const a = terrain.biomeAt(11, -22);
+      const b = terrain.biomeAt(11, -22);
+      expect(a).toEqual(b);
+      expect(terrain.corruptionAt(11, -22)).toBe(terrain.corruptionAt(11, -22));
+    });
+  });
 });

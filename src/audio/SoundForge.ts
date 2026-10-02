@@ -133,6 +133,17 @@ function base64FromBytes(bytes: Uint8Array): string {
   return out;
 }
 
+/**
+ * Render a float clip straight to a WAV data URI.
+ *
+ * The two steps - quantise, then containerise - are always taken together, and
+ * a caller that has to remember both is a caller that can forget one and hand
+ * Howler a `Float32Array`.
+ */
+export function clipDataUri(signal: Float32Array, sampleRate: number = DEFAULT_SAMPLE_RATE): string {
+  return wavDataUri(toPcm16(signal), sampleRate);
+}
+
 /** Quantise a float clip to 16-bit PCM, clamping rather than wrapping. */
 export function toPcm16(signal: Float32Array): Int16Array {
   const pcm = new Int16Array(signal.length);
@@ -177,16 +188,21 @@ export class Biquad {
 
   /** Recompute the coefficients. Cheap enough to call per sample. */
   set(kind: BiquadKind, frequency: number, sampleRate: number, q = Math.SQRT1_2): void {
-    // A biquad is only defined strictly inside (0, Nyquist). A query at or past
-    // the edge produces `alpha = Infinity` or negative, and the whole clip
-    // becomes NaN with no error anywhere - which is the failure mode this
-    // guard exists to prevent.
+    // A biquad is only defined strictly inside (0, Nyquist). A corner at or past
+    // the edge produces `alpha = Infinity` or negative, and a NaN or unstable
+    // coefficient silently turns a whole clip into NaN - which is silence, not
+    // an error. Both the frequency and the Q are guarded, because `Math.max(1,
+    // NaN)` is NaN and a guard that only looks at one of the two inputs is not
+    // a guard. A non-finite corner is treated as Nyquist: fully open.
     const nyquist = sampleRate / 2;
-    const f0 = Math.min(nyquist * 0.999, Math.max(1, frequency));
+    const wanted = Number.isFinite(frequency) ? frequency : nyquist;
+    const f0 = Math.min(nyquist * 0.999, Math.max(1, wanted));
+    const quality = Number.isFinite(q) ? Math.max(0.0001, q) : Math.SQRT1_2;
+
     const w0 = (2 * Math.PI * f0) / sampleRate;
     const cosw0 = Math.cos(w0);
     const sinw0 = Math.sin(w0);
-    const alpha = sinw0 / (2 * Math.max(0.0001, q));
+    const alpha = sinw0 / (2 * quality);
 
     let b0: number;
     let b1: number;
@@ -261,16 +277,35 @@ export function normalise(signal: Float32Array, peak = NORMALISE_PEAK): Float32A
  *
  * A loop that is cut at an arbitrary point clicks once per repetition, and a
  * click at 0.2 Hz is one of the most conspicuous artefacts in a mix. The fix is
- * to render `length + fade` samples and blend the extra tail back over the
- * head over `fade` samples, so the waveform at the wrap point is continuous
- * both in value and in slope.
+ * to render `length + fade` samples and blend the extra tail back over the head
+ * over `fade` samples, so the waveform at the wrap point is continuous both in
+ * value and in slope.
+ *
+ * Only the head is blended, and only against the tail rendered past the end.
+ * Blending the whole output - which is the obvious way to write this - reads
+ * `signal[length + i]` for every `i` up to `length`, and the array only has
+ * `length + fade` entries. Every read past the end returns `undefined`, and
+ * `undefined * anything` is NaN, so the entire loop comes back NaN. A NaN loop
+ * is silent rather than loud, which is the worst possible way for this to fail:
+ * nothing errors, nothing warns, and three of the world's ambient layers simply
+ * do not exist.
  */
-export function loopCrossfade(signal: Float32Array, fadeSeconds: number, sampleRate: number): Float32Array {
+export function loopCrossfade(
+  signal: Float32Array,
+  fadeSeconds: number,
+  sampleRate: number,
+): Float32Array {
   const fade = Math.min(signal.length - 1, Math.max(1, Math.round(fadeSeconds * sampleRate)));
   const length = signal.length - fade;
+  if (length <= 0) return signal.slice();
+
   const out = new Float32Array(length);
-  for (let i = 0; i < length; i++) {
-    const w = i < fade ? i / fade : 1;
+  // The body is the rendered signal, untouched.
+  out.set(signal.subarray(0, length));
+  // Only the head is blended, and only against the tail that was rendered past
+  // the end of the loop.
+  for (let i = 0; i < fade; i++) {
+    const w = i / fade;
     out[i] = signal[i] * w + signal[length + i] * (1 - w);
   }
   return out;

@@ -27,6 +27,7 @@
  * =============================================================================
  */
 
+import { Vector3 } from 'three';
 import { Engine } from './core/Engine';
 import { EventBus, eventBus } from './core/EventBus';
 import {
@@ -235,9 +236,23 @@ async function boot(): Promise<void> {
       return;
     }
 
+    // Scratch vector for the camera's forward direction, allocated once. A
+    // per-frame allocation here would be a per-frame allocation of a 32-byte
+    // object at 60 Hz for the lifetime of the session.
+    const ambientForward = new Vector3();
+
     // The world: ground plane, sky dome, light rig and the player. No depth fog -
     // that is the render pipeline's atmosphere pass, wired just below.
-    const worldScene = new WorldScene({ scene: renderPipeline.scene, physics });
+    const worldScene = new WorldScene({
+      scene: renderPipeline.scene,
+      physics,
+      // Both audio systems on. Each is a no-op until the browser grants an
+      // AudioContext, which it will not do before the first gesture - Howler's
+      // own auto-unlock queues the play() calls made here and releases them the
+      // moment the player clicks or presses a key.
+      stream: { audio: {} },
+      audio: {},
+    });
 
     // The atmosphere pass needs a top-down map of the world - where the valley
     // floor is and where the rot is - and the world has to exist before that map
@@ -355,7 +370,13 @@ async function boot(): Promise<void> {
       // The camera, not the player, is the listener: the stream's sound should
       // come from where the player is looking, and the camera is what follows
       // the player through the world.
-      worldScene.update(timeController.getDelta(), renderPipeline.camera.position);
+      // The camera's forward direction, flattened, so the ambient audio can pan
+      // the bird calls and the animal calls around the player. Computed here
+      // rather than inside the world because the world has no camera - it is
+      // handed a listener position, and a direction is the caller's to supply.
+      renderPipeline.camera.getWorldDirection(ambientForward);
+
+      worldScene.update(timeController.getDelta(), renderPipeline.camera.position, ambientForward);
       // The post chain runs on game time like everything else, so the fog's
       // drift and the glow's flicker stop when the Active Encounter dilates time
       // in Phase 3.

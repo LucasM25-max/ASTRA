@@ -225,6 +225,51 @@ export class CharacterAnimator {
   }
 
   /**
+   * Position within the current stride cycle, 0 to 1, or 0 when not striding.
+   *
+   * Read straight off the mixer's own action time, so it is the phase the
+   * character is *actually* in - not a second timer that has to be kept in step
+   * with the first. There are two footfalls per cycle, at phase 0 and phase 0.5,
+   * and a consumer fires one whenever the phase crosses either. Deriving the
+   * cadence from the clip rather than from the speed is what stops the feet
+   * skating against the sound during the crossfade between walk and run, where
+   * both clips are running at once at partial weights.
+   */
+  get stridePhase(): number {
+    if (this.disposed || this.jumping) return 0;
+    const state = this.current;
+    if (state !== 'walk' && state !== 'run') return 0;
+    const duration = this.clips[state].duration;
+    if (!(duration > 0)) return 0;
+    // Modulo rather than a bare read: a looping action's time is normally kept
+    // inside [0, duration) by the mixer, but a freshly reset or just-crossfaded
+    // action can report exactly the duration, and phase 1.0 would be read as a
+    // footfall that has not happened yet.
+    const t = ((this.actions[state].time % duration) + duration) % duration;
+    return t / duration;
+  }
+
+  /**
+   * Seconds between footfalls at the current speed, or 0 when not striding.
+   *
+   * Computed from the same time scale `setSpeed` wrote into the action, so the
+   * sound and the stride are driven by one number rather than by two that agree
+   * only at the reference speed. Below the clamp the animation stops slowing
+   * down before the body does; the audio follows the animation in that regime,
+   * because what the player should hear is what the player can see.
+   */
+  get footfallInterval(): number {
+    if (this.disposed || this.jumping) return 0;
+    const state = this.current;
+    if (state !== 'walk' && state !== 'run') return 0;
+    const duration = this.clips[state].duration;
+    const scale = this.actions[state].timeScale;
+    if (!(duration > 0) || !(scale > 0)) return 0;
+    // Two footfalls per cycle: left, right.
+    return duration / scale / 2;
+  }
+
+  /**
    * Tell the animator how fast the character is moving over the ground.
    *
    * This is the only input the locomotion needs, which is deliberate: deriving

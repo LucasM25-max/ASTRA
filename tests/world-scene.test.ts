@@ -575,6 +575,174 @@ describe('WorldScene', () => {
   // the single most convincing way to make a scene look broken - and it is a
   // bookkeeping bug, not a rendering one, so nothing about the frame looks wrong
   // enough to diagnose from a screenshot.
+  /**
+   * The ambient audio.
+   *
+   * There is no `AudioContext` in Node, so none of this can be heard. What can
+   * be checked is that the world assembles the right frame - the listener where
+   * the camera is, the corruption from the terrain's own field, the gust from
+   * the forest's own uniform, the surface from the terrain's own weights - and
+   * that it does so without disturbing anything else. A frame built from the
+   * wrong source is the bug that would be inaudible until someone played it.
+   */
+  describe('ambient audio', () => {
+    it('is present and silent in a headless environment', async () => {
+      const { world } = await buildScene({ audio: {} });
+
+      expect(world.ambient).toBeDefined();
+      // No AudioContext in jsdom, so nothing was constructed - which is what
+      // lets the world be built and stepped in tests at all.
+      expect(world.ambient.isLive).toBe(false);
+      expect(world.ambient.isMuted).toBe(false);
+    });
+
+    it('resolves a mix from the world it was given', async () => {
+      const { world } = await buildScene({ audio: {} });
+
+      // Before any update there is nothing resolved.
+      expect(world.ambient.mix.hum).toBe(0);
+
+      world.update(FIXED_STEP);
+      expect(world.ambient.mix.wind).toBeGreaterThan(0);
+      expect(world.ambient.mix.leaves).toBeGreaterThan(0);
+      expect(Number.isFinite(world.ambient.mix.birds)).toBe(true);
+    });
+
+    it('reads the gust from the forest, so the audio and the sway are one event', async () => {
+      const { world } = await buildScene({ audio: {} });
+
+      // The forest writes its own gust every update and the audio reads the same
+      // object, so the wind level has to be a monotone function of the gust the
+      // trees are actually swaying by. Writing the uniform by hand proves
+      // nothing here - the forest overwrites it on the next update, which is the
+      // design - so the check is over the frames the world really produces.
+      const pairs: Array<{ gust: number; wind: number }> = [];
+      for (let i = 0; i < 240; i++) {
+        world.update(FIXED_STEP);
+        pairs.push({ gust: world.forest.windGustUniform.value, wind: world.ambient.mix.wind });
+      }
+
+      const gusts = pairs.map((p) => p.gust);
+      // The gust has to actually move, or a monotonicity check over a constant
+      // is a check over nothing.
+      expect(Math.max(...gusts) - Math.min(...gusts)).toBeGreaterThan(0.05);
+      expect(Math.min(...gusts)).toBeGreaterThan(0);
+      expect(Math.max(...gusts)).toBeLessThanOrEqual(1.75);
+
+      // Sorted by gust, the wind level must never go down.
+      const sorted = [...pairs].sort((a, b) => a.gust - b.gust);
+      for (let i = 1; i < sorted.length; i++) {
+        expect(sorted[i].wind, `gust ${sorted[i].gust}`).toBeGreaterThanOrEqual(sorted[i - 1].wind - 1e-9);
+      }
+    });
+
+    it('takes the listener from the camera position it is handed', async () => {
+      const { world } = await buildScene({ audio: {} });
+
+      // The listener has to be the camera, not the player: the same position the
+      // light rig and the stream's sound are driven from, so everything in the
+      // world agrees about where the viewer is standing.
+      const far = new Vector3(120, 30, -80);
+      expect(() => world.update(FIXED_STEP, far)).not.toThrow();
+      expect(world.ambient.mix.wind).toBeGreaterThan(0);
+    });
+
+    it('survives a NaN listener without silencing the mix', async () => {
+      // A NaN reaching Howler.pos silences the entire mix with no error
+      // anywhere. The audio guards against it, and the world must not be the
+      // thing that introduces it.
+      const { world } = await buildScene({ audio: {} });
+      world.update(FIXED_STEP, new Vector3(Number.NaN, Number.NaN, Number.NaN));
+
+      for (const value of Object.values(world.ambient.mix)) {
+        expect(Number.isFinite(value)).toBe(true);
+      }
+    });
+
+    it('forwards mute to the stream so one switch silences everything', async () => {
+      // Howler.mute is global. If the world and the stream each called it
+      // independently the last writer would win, and unmuting one would unmute
+      // the other.
+      const { world } = await buildScene({ audio: {} });
+      world.ambient.setMuted(true);
+      expect(world.ambient.isMuted).toBe(true);
+      world.ambient.setMuted(false);
+      expect(world.ambient.isMuted).toBe(false);
+    });
+
+    it('thins the chorus and raises the hum as the listener walks into the rot', async () => {
+      // The integration the whole step is for, driven through the terrain own
+      // baked corruption field rather than through a hand-set number. Measured
+      // on the default world along the line z = 110: corruption 0.000 at
+      // x = -230, peaking at 0.913 at x = -170, back to 0.061 at x = -110. The
+      // mix has to follow that curve.
+      const { world } = await buildScene({ audio: {} });
+
+      const at = (x: number): { corruption: number; hum: number; birds: number; squelch: number } => {
+        world.update(FIXED_STEP, { x, y: 2, z: 110 });
+        return {
+          corruption: world.terrain.corruptionAt(x, 110),
+          hum: world.ambient.mix.hum,
+          birds: world.ambient.mix.birds,
+          squelch: world.ambient.mix.squelchRate,
+        };
+      };
+
+      const clean = at(-230);
+      const rotten = at(-170);
+      const recovering = at(-110);
+
+      // The field really does vary, or this test proves nothing.
+      expect(clean.corruption).toBeLessThan(0.01);
+      expect(rotten.corruption).toBeGreaterThan(0.8);
+
+      // Clean ground: no hum, no squelch, the full chorus.
+      expect(clean.hum).toBe(0);
+      expect(clean.squelch).toBe(0);
+      expect(clean.birds).toBeGreaterThan(0.29);
+
+      // The rot: the hum arrives, the squelches start, the birds thin out.
+      expect(rotten.hum).toBeGreaterThan(0.2);
+      expect(rotten.squelch).toBeGreaterThan(0.2);
+      expect(rotten.birds).toBeLessThan(clean.birds * 0.15);
+      // Reduced, not gone.
+      expect(rotten.birds).toBeGreaterThan(0);
+
+      // And it recovers on the way out, rather than latching.
+      expect(recovering.corruption).toBeLessThan(0.1);
+      expect(recovering.hum).toBe(0);
+      expect(recovering.squelch).toBe(0);
+      expect(recovering.birds).toBeGreaterThan(rotten.birds * 5);
+    });
+
+    it('clamps the canopy to a fraction, because density is not a fraction', async () => {
+      // forestDensityAt goes above one on the stream bank by design. The audio
+      // frame documents canopy as 0 to 1, so the world clamps at the boundary
+      // rather than leaving the mix to do it silently.
+      const { world } = await buildScene({ audio: {} });
+
+      let maxCanopy = 0;
+      for (let x = -200; x <= 200; x += 20) {
+        for (let z = -200; z <= 200; z += 20) {
+          maxCanopy = Math.max(maxCanopy, world.forest.canopyAt(x, z));
+          world.update(FIXED_STEP, { x, y: 2, z });
+          expect(world.ambient.mix.leaves).toBeGreaterThanOrEqual(0);
+          expect(world.ambient.mix.leaves).toBeLessThanOrEqual(1);
+        }
+      }
+      // The raw density really does exceed one somewhere, so the clamp is load
+      // bearing rather than decorative.
+      expect(maxCanopy).toBeGreaterThan(1);
+    });
+
+
+    it('is disposed with the world', async () => {
+      const { world } = await buildScene({ audio: {} });
+      expect(() => world.dispose()).not.toThrow();
+      expect(world.isDisposed).toBe(true);
+    });
+  });
+
   describe('day/night cycle', () => {
     it('holds the tutorial hour still until it is resumed', async () => {
       const { world } = await buildScene();

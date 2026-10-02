@@ -104,6 +104,7 @@ import { createFungusMaterial } from '../procedural/FungusMaterial';
 import { CorruptionField } from '../procedural/CorruptionField';
 import { SimplexNoise2D, createRng } from '../procedural/NoiseLibrary';
 import {
+  forestDensityAt,
   placeTrees,
   tierTrees,
   TREE_TYPES,
@@ -349,6 +350,19 @@ export class Forest {
 
   /** The world the foliage scatter samples. Same field the placement used. */
   private readonly foliageField: ForestField;
+
+  /**
+   * 0 bare ground to 1 deep forest, at a world position.
+   *
+   * The same density field the trees were placed against, read through
+   * `forestDensityAt` rather than through a second approximation. The ambient
+   * audio uses it to decide how much of the leaf-rustle layer to raise, and a
+   * forest that rustles where there are no trees is a bug with an audible
+   * symptom.
+   */
+  canopyAt(x: number, z: number): number {
+    return forestDensityAt(x, z, this.foliageField);
+  }
   private readonly foliageGeometry: FoliageGeometrySet;
   private readonly foliageCounts: Record<FoliageKind, number>;
   private foliageInstances: FoliageInstance[] = [];
